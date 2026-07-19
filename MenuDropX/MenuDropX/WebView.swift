@@ -129,6 +129,56 @@ struct WebView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.customUserAgent = viewModel.isDesktopUA ? Self.desktopUserAgent : Self.mobileUserAgent
         
+        // 绑定命令执行器，避开 SwiftUI updateNSView 延迟和调用竞态，实现即时瞬间响应
+        viewModel.loadURLExecutor = { [weak webView] urlStr in
+            if urlStr == "menudropx://home" {
+                webView?.loadHTMLString(Self.navigationHTML, baseURL: URL(string: "https://menudropx.local"))
+            } else if let url = URL(string: urlStr) {
+                webView?.load(URLRequest(url: url))
+            }
+        }
+        viewModel.loadHomeExecutor = { [weak webView] in
+            webView?.loadHTMLString(Self.navigationHTML, baseURL: URL(string: "https://menudropx.local"))
+        }
+        viewModel.goBackExecutor = { [weak webView] in
+            if webView?.canGoBack == true {
+                webView?.goBack()
+            }
+        }
+        viewModel.goForwardExecutor = { [weak webView] in
+            if webView?.canGoForward == true {
+                webView?.goForward()
+            }
+        }
+        viewModel.reloadExecutor = { [weak webView] in
+            webView?.reload()
+        }
+        
+        // 监听 URL 与前进后退状态变化（KVO 可完美拦截 SPA 应用的 HTML5 History API 路由修改，如 pushState）
+        context.coordinator.urlObservation = webView.observe(\.url, options: [.initial, .new]) { [weak viewModel] webView, _ in
+            DispatchQueue.main.async {
+                guard let viewModel = viewModel else { return }
+                let isHomePage = webView.url?.host == "menudropx.local"
+                if isHomePage {
+                    viewModel.urlInput = ""
+                } else if let url = webView.url, let scheme = url.scheme, scheme.hasPrefix("http") {
+                    viewModel.urlInput = url.absoluteString
+                }
+            }
+        }
+        
+        context.coordinator.backObservation = webView.observe(\.canGoBack, options: [.initial, .new]) { [weak viewModel] webView, _ in
+            DispatchQueue.main.async {
+                viewModel?.canGoBack = webView.canGoBack
+            }
+        }
+        
+        context.coordinator.forwardObservation = webView.observe(\.canGoForward, options: [.initial, .new]) { [weak viewModel] webView, _ in
+            DispatchQueue.main.async {
+                viewModel?.canGoForward = webView.canGoForward
+            }
+        }
+        
         // 追踪活跃的真实 WKWebView 实例，以在 UserDefaults 或配置改变时直接跨窗口广播同步
         WebView.activeWebViews.append(WeakWKWebView(webView, viewModel: viewModel))
         WebView.activeWebViews.removeAll { $0.webView == nil }
@@ -151,8 +201,12 @@ struct WebView: NSViewRepresentable {
         let targetUA = viewModel.isDesktopUA ? Self.desktopUserAgent : Self.mobileUserAgent
         if nsView.customUserAgent != targetUA {
             nsView.customUserAgent = targetUA
-            nsView.reload()
+            // 如果是首次 SwiftUI updateNSView 绘制，跳过 reload()，因为 makeNSView 中刚刚加载过正确的 UA 网页
+            if !context.coordinator.isFirstUpdate {
+                nsView.reload()
+            }
         }
+        context.coordinator.isFirstUpdate = false
         
         switch viewModel.action {
         case .none:
@@ -187,6 +241,12 @@ struct WebView: NSViewRepresentable {
     
     class Coordinator: NSObject, WKNavigationDelegate {
         var viewModel: WebViewModel
+        var isFirstUpdate = true
+        
+        // 观察者生命周期持有者，防止出作用域被自动销毁
+        var urlObservation: NSKeyValueObservation?
+        var backObservation: NSKeyValueObservation?
+        var forwardObservation: NSKeyValueObservation?
         
         init(_ viewModel: WebViewModel) {
             self.viewModel = viewModel
@@ -195,46 +255,43 @@ struct WebView: NSViewRepresentable {
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             DispatchQueue.main.async {
                 self.viewModel.isLoading = true
+                self.syncNavigationState(webView)
+            }
+        }
+        
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            DispatchQueue.main.async {
+                self.syncNavigationState(webView)
             }
         }
         
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             DispatchQueue.main.async {
                 self.viewModel.isLoading = false
-                self.viewModel.canGoBack = webView.canGoBack
-                self.viewModel.canGoForward = webView.canGoForward
+                self.syncNavigationState(webView)
                 
-                // 关键修复：首先明确判断是否是本地首页
-                // 首页的 baseURL 是 https://menudropx.local，scheme 是 https，
-                // 若只用 scheme.hasPrefix("http") 会把首页误判为外部 URL！
-                let isHomePage = webView.url?.host == "menudropx.local"
-                
-                if isHomePage {
-                    // 本地导航首页：清空 URL 栏和图标，并注入最新的预设配置数据
-                    self.viewModel.urlInput = ""
-                    self.viewModel.currentFavicon = nil
-                    self.viewModel.currentFaviconColor = nil
-                    WebView.injectPresetsDataStatic(to: webView)
-                } else if let url = webView.url, let scheme = url.scheme, scheme.hasPrefix("http") {
-                    // 外部普通网页：更新 URL 栏并获取 Favicon
-                    self.viewModel.urlInput = url.absoluteString
-                    if let host = url.host {
-                        self.fetchFavicon(for: host) { [weak self] colorImg, templateImg in
-                            DispatchQueue.main.async {
-                                self?.viewModel.currentFaviconColor = colorImg
-                                self?.viewModel.currentFavicon = templateImg
-                            }
+                // 页面完全加载完成后，才去尝试下载网页图标
+                if let url = webView.url, let host = url.host, url.host != "menudropx.local" {
+                    self.fetchFavicon(for: host) { [weak self] colorImg, templateImg in
+                        DispatchQueue.main.async {
+                            self?.viewModel.currentFaviconColor = colorImg
+                            self?.viewModel.currentFavicon = templateImg
                         }
-                    } else {
-                        self.viewModel.currentFavicon = nil
-                        self.viewModel.currentFaviconColor = nil
                     }
-                } else {
-                    // 其他情形（file://, data:// 等）
-                    self.viewModel.urlInput = ""
-                    self.viewModel.currentFavicon = nil
-                    self.viewModel.currentFaviconColor = nil
                 }
+            }
+        }
+        
+        /// 统一的实时同步方法
+        private func syncNavigationState(_ webView: WKWebView) {
+            let isHomePage = webView.url?.host == "menudropx.local"
+            
+            if isHomePage {
+                // 本地导航首页：清空 URL 栏和图标，并注入最新的预设配置数据
+                self.viewModel.urlInput = ""
+                self.viewModel.currentFavicon = nil
+                self.viewModel.currentFaviconColor = nil
+                WebView.injectPresetsDataStatic(to: webView)
             }
         }
         

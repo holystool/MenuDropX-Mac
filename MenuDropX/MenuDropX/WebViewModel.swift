@@ -58,6 +58,13 @@ class WebViewModel: ObservableObject {
     // 当前待执行的网页操作，由 View 修改，WebView 监听并执行
     @Published var action: WebAction = .none
     
+    // 供底层的真实 WKWebView 注册的主动控制闭包，避开 SwiftUI 的 updateNSView 异步响应延迟
+    var loadURLExecutor: ((String) -> Void)?
+    var loadHomeExecutor: (() -> Void)?
+    var goBackExecutor: (() -> Void)?
+    var goForwardExecutor: (() -> Void)?
+    var reloadExecutor: (() -> Void)?
+
     // 供 AppDelegate 监听的 Pin 状态改变回调
     var onPinChanged: ((Bool) -> Void)?
     
@@ -75,22 +82,38 @@ class WebViewModel: ObservableObject {
     
     /// 后退
     func goBack() {
-        action = .goBack
+        if let executor = goBackExecutor {
+            executor()
+        } else {
+            action = .goBack
+        }
     }
     
     /// 前进
     func goForward() {
-        action = .goForward
+        if let executor = goForwardExecutor {
+            executor()
+        } else {
+            action = .goForward
+        }
     }
     
     /// 刷新
     func reload() {
-        action = .reload
+        if let executor = reloadExecutor {
+            executor()
+        } else {
+            action = .reload
+        }
     }
     
     /// 返回主页
     func loadHome() {
-        action = .loadHome
+        if let executor = loadHomeExecutor {
+            executor()
+        } else {
+            action = .loadHome
+        }
     }
     
     /// 加载指定的 URL 地址
@@ -104,6 +127,10 @@ class WebViewModel: ObservableObject {
             cleanURL = "https://" + cleanURL
         }
         
-        action = .load(cleanURL)
+        if let executor = loadURLExecutor {
+            executor(cleanURL)
+        } else {
+            action = .load(cleanURL)
+        }
     }
 }
