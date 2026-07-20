@@ -51,6 +51,12 @@ class WebViewModel: ObservableObject {
     // 当前页面是否已被翻译过（用于底栏按钮变蓝状态及双向还原逻辑）
     @Published var isPageTranslated: Bool = false
     
+    // 当前页面若是通过首页自定义文字图标卡片点击进入的，缓存对应的文字图标配置
+    @Published var pendingTextIcon: String? = nil
+    @Published var pendingTextIconName: String? = nil
+    @Published var pendingTextIconColor: String? = nil
+    @Published var pendingTextIconDomain: String? = nil
+    
     // 网页控制动作枚举，用于单向命令传递
     enum WebAction: Equatable {
         case none

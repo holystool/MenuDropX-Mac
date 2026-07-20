@@ -297,10 +297,25 @@ struct WebView: NSViewRepresentable {
                 
                 // 页面完全加载完成后，才去尝试下载网页图标
                 if let url = webView.url, let host = url.host, url.host != "menudropx.local" {
-                    self.fetchFavicon(for: host) { [weak self] colorImg, templateImg in
-                        DispatchQueue.main.async {
-                            self?.viewModel.currentFaviconColor = colorImg
-                            self?.viewModel.currentFavicon = templateImg
+                    // 检查是否跳转离开了当前自定义的文字图标宿主域名
+                    if let pendingDomain = self.viewModel.pendingTextIconDomain, !pendingDomain.isEmpty {
+                        if !host.lowercased().contains(pendingDomain.lowercased()) {
+                            self.viewModel.pendingTextIcon = nil
+                            self.viewModel.pendingTextIconName = nil
+                            self.viewModel.pendingTextIconColor = nil
+                            self.viewModel.pendingTextIconDomain = nil
+                        }
+                    }
+                    
+                    if let text = self.viewModel.pendingTextIcon, !text.isEmpty {
+                        // 如果有自定义文字图标，直接生成，跳过 favicon 下载
+                        self.updateMenuIconToText(text: text, name: self.viewModel.pendingTextIconName ?? "", colorKey: self.viewModel.pendingTextIconColor ?? "")
+                    } else {
+                        self.fetchFavicon(for: host) { [weak self] colorImg, templateImg in
+                            DispatchQueue.main.async {
+                                self?.viewModel.currentFaviconColor = colorImg
+                                self?.viewModel.currentFavicon = templateImg
+                            }
                         }
                     }
                 }
@@ -316,6 +331,10 @@ struct WebView: NSViewRepresentable {
                 self.viewModel.urlInput = ""
                 self.viewModel.currentFavicon = nil
                 self.viewModel.currentFaviconColor = nil
+                self.viewModel.pendingTextIcon = nil
+                self.viewModel.pendingTextIconName = nil
+                self.viewModel.pendingTextIconColor = nil
+                self.viewModel.pendingTextIconDomain = nil
                 WebView.injectPresetsDataStatic(to: webView)
             }
             self.viewModel.isPageTranslated = false
@@ -417,6 +436,24 @@ struct WebView: NSViewRepresentable {
                         DispatchQueue.main.async {
                             self.viewModel.isPageTranslated = isTrans
                         }
+                    }
+                    return
+                }
+                
+                // 类型五：点击自定义文字图标卡片时，实时推送给 Swift 同步至菜单栏图标
+                if let type = body["type"] as? String, type == "updateActiveIcon" {
+                    let name = body["name"] as? String ?? ""
+                    let iconText = body["iconText"] as? String ?? ""
+                    let iconColor = body["iconColor"] as? String ?? ""
+                    let domain = body["domain"] as? String ?? ""
+                    
+                    self.viewModel.pendingTextIcon = iconText
+                    self.viewModel.pendingTextIconName = name
+                    self.viewModel.pendingTextIconColor = iconColor
+                    self.viewModel.pendingTextIconDomain = domain
+                    
+                    if !iconText.isEmpty {
+                        self.updateMenuIconToText(text: iconText, name: name, colorKey: iconColor)
                     }
                     return
                 }
@@ -764,6 +801,99 @@ struct WebView: NSViewRepresentable {
                     self.tryDownload(urls: urls, index: index + 1, completion: completion)
                 }
             }.resume()
+        }
+        
+        /// 绘制并更新状态栏文字图标
+        private func updateMenuIconToText(text: String, name: String, colorKey: String) {
+            let textIconImage = generateTextIconImage(text: text, name: name, colorKey: colorKey)
+            DispatchQueue.main.async {
+                self.viewModel.currentFaviconColor = textIconImage
+                self.viewModel.currentFavicon = textIconImage
+            }
+        }
+        
+        /// 动态在 16x16 像素的 NSImage 内绘制带有圆角渐变背景的文字图标
+        private func generateTextIconImage(text: String, name: String, colorKey: String) -> NSImage {
+            let size = NSSize(width: 16, height: 16)
+            return NSImage(size: size, flipped: false) { rect in
+                // 1. 绘制渐变背景
+                let colors = self.getGradientColors(name: name, colorKey: colorKey)
+                let gradient = NSGradient(starting: colors.0, ending: colors.1)
+                let path = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
+                gradient?.draw(in: path, angle: 45)
+                
+                // 2. 绘制居中文字
+                let font = NSFont.systemFont(ofSize: text.count > 1 ? 8 : 10, weight: .bold)
+                let paragraphStyle = NSMutableParagraphStyle()
+                paragraphStyle.alignment = .center
+                
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: NSColor.white,
+                    .paragraphStyle: paragraphStyle
+                ]
+                
+                let textSize = text.size(withAttributes: attributes)
+                let textRect = NSRect(
+                    x: 0,
+                    y: (size.height - textSize.height) / 2 - 0.5,
+                    width: size.width,
+                    height: textSize.height
+                )
+                
+                text.draw(in: textRect, withAttributes: attributes)
+                return true
+            }
+        }
+        
+        /// 在 Swift 侧同步 JS 中的高颜值渐变配色列表，以生成相同色系的菜单栏图标
+        private func getGradientColors(name: String, colorKey: String) -> (NSColor, NSColor) {
+            switch colorKey {
+            case "red":
+                return (NSColor(red: 1.0, green: 0.14, blue: 0.26, alpha: 1.0), NSColor(red: 1.0, green: 0.32, blue: 0.48, alpha: 1.0))
+            case "orange":
+                return (NSColor(red: 1.0, green: 0.89, blue: 0.07, alpha: 1.0), NSColor(red: 0.98, green: 0.75, blue: 0.18, alpha: 1.0))
+            case "green":
+                return (NSColor(red: 0.10, green: 0.68, blue: 0.10, alpha: 1.0), NSColor(red: 0.17, green: 0.64, blue: 0.27, alpha: 1.0))
+            case "blue":
+                return (NSColor(red: 0.23, green: 0.51, blue: 0.96, alpha: 1.0), NSColor(red: 0.11, green: 0.31, blue: 0.85, alpha: 1.0))
+            case "purple":
+                return (NSColor(red: 0.55, green: 0.36, blue: 0.96, alpha: 1.0), NSColor(red: 0.43, green: 0.16, blue: 0.85, alpha: 1.0))
+            case "grey":
+                return (NSColor(red: 0.29, green: 0.33, blue: 0.39, alpha: 1.0), NSColor(red: 0.12, green: 0.16, blue: 0.22, alpha: 1.0))
+            default:
+                if name.contains("小红书") {
+                    return (NSColor(red: 1.0, green: 0.14, blue: 0.26, alpha: 1.0), NSColor(red: 1.0, green: 0.32, blue: 0.48, alpha: 1.0))
+                } else if name.contains("即刻") {
+                    return (NSColor(red: 1.0, green: 0.89, blue: 0.07, alpha: 1.0), NSColor(red: 0.98, green: 0.75, blue: 0.18, alpha: 1.0))
+                } else if name.contains("微信") || name.contains("读书") {
+                    return (NSColor(red: 0.10, green: 0.68, blue: 0.10, alpha: 1.0), NSColor(red: 0.17, green: 0.64, blue: 0.27, alpha: 1.0))
+                } else if name.contains("微博") {
+                    return (NSColor(red: 0.90, green: 0.09, blue: 0.18, alpha: 1.0), NSColor(red: 1.0, green: 0.32, blue: 0.32, alpha: 1.0))
+                } else if name.contains("Bilibili") || name.contains("bilibili") || name.contains("B站") {
+                    return (NSColor(red: 0.98, green: 0.45, blue: 0.60, alpha: 1.0), NSColor(red: 1.0, green: 0.62, blue: 0.71, alpha: 1.0))
+                } else if name.contains("滴答") {
+                    return (NSColor(red: 0.22, green: 0.39, blue: 0.96, alpha: 1.0), NSColor(red: 0.42, green: 0.56, blue: 1.0, alpha: 1.0))
+                }
+                
+                var hash = 0
+                for char in name.utf8 {
+                    hash = Int(char) + ((hash << 5) - hash)
+                }
+                
+                let colorsList: [(NSColor, NSColor)] = [
+                    (NSColor(red: 0.23, green: 0.51, blue: 0.96, alpha: 1.0), NSColor(red: 0.11, green: 0.31, blue: 0.85, alpha: 1.0)),
+                    (NSColor(red: 0.06, green: 0.73, blue: 0.51, alpha: 1.0), NSColor(red: 0.02, green: 0.47, blue: 0.34, alpha: 1.0)),
+                    (NSColor(red: 0.96, green: 0.62, blue: 0.04, alpha: 1.0), NSColor(red: 0.71, green: 0.33, blue: 0.04, alpha: 1.0)),
+                    (NSColor(red: 0.93, green: 0.28, blue: 0.60, alpha: 1.0), NSColor(red: 0.75, green: 0.09, blue: 0.36, alpha: 1.0)),
+                    (NSColor(red: 0.55, green: 0.36, blue: 0.96, alpha: 1.0), NSColor(red: 0.43, green: 0.16, blue: 0.85, alpha: 1.0)),
+                    (NSColor(red: 0.94, green: 0.27, blue: 0.27, alpha: 1.0), NSColor(red: 0.73, green: 0.11, blue: 0.11, alpha: 1.0)),
+                    (NSColor(red: 0.02, green: 0.71, blue: 0.83, alpha: 1.0), NSColor(red: 0.03, green: 0.57, blue: 0.70, alpha: 1.0))
+                ]
+                
+                let index = abs(hash) % colorsList.count
+                return colorsList[index]
+            }
         }
     }
 }
@@ -1387,6 +1517,18 @@ extension WebView {
                     return;
                 }
                 if (site) {
+                    // 若设定了自定义文字图标，实时推送给 Swift 以同步菜单栏图标
+                    if (site.iconText) {
+                        try {
+                            window.webkit.messageHandlers.menuDropXTranslate.postMessage({
+                                type: 'updateActiveIcon',
+                                name: site.name,
+                                iconText: site.iconText,
+                                iconColor: site.iconColor || '',
+                                domain: site.domain || ''
+                            });
+                        } catch(e) {}
+                    }
                     window.location.href = site.url;
                 } else {
                     openModal(index);
