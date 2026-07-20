@@ -268,6 +268,9 @@ struct WebView: NSViewRepresentable {
         var lastIsDesktopUA: Bool? = nil
         var lastSelectedText: String = ""
         
+        // 用于防止苹果音乐 Universal Links 唤醒外部 App 的自锁标记
+        private var bypassUniversalLinkForAppleMusic = false
+        
         // 观察者生命周期持有者，防止出作用域被自动销毁
         var urlObservation: NSKeyValueObservation?
         var backObservation: NSKeyValueObservation?
@@ -340,45 +343,75 @@ struct WebView: NSViewRepresentable {
             self.viewModel.isPageTranslated = false
         }
         
-        // 核心拦截跳转：监听 menudropx:// 自定义加载/清空配置协议并触发 Swift 对应操作
+        // 核心拦截跳转：监听 menudropx:// 自定义加载/清空配置协议并触发 Swift 对应操作，以及阻断 Universal Links 唤醒外部 App
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            if let url = navigationAction.request.url,
-               let scheme = url.scheme,
-               scheme == "menudropx" {
-                
-                // 拦截加载配置指令
-                if url.host == "loadconfig",
-                   let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-                   let queryItems = components.queryItems,
-                   let idStr = queryItems.first(where: { $0.name == "id" })?.value,
-                   let id = Int(idStr) {
-                    
-                    DispatchQueue.main.async {
-                        if let appDelegate = AppDelegate.shared {
-                            if let instance = appDelegate.instances.first(where: { $0.viewModel === self.viewModel }) {
-                                appDelegate.loadPresetConfig(id: id, fromInstance: instance)
+            guard let url = navigationAction.request.url else {
+                decisionHandler(.allow)
+                return
+            }
+            
+            if let scheme = url.scheme {
+                if scheme == "menudropx" {
+                    // 拦截加载配置指令
+                    if url.host == "loadconfig",
+                       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                       let queryItems = components.queryItems,
+                       let idStr = queryItems.first(where: { $0.name == "id" })?.value,
+                       let id = Int(idStr) {
+                        
+                        DispatchQueue.main.async {
+                            if let appDelegate = AppDelegate.shared {
+                                if let instance = appDelegate.instances.first(where: { $0.viewModel === self.viewModel }) {
+                                    appDelegate.loadPresetConfig(id: id, fromInstance: instance)
+                                }
                             }
                         }
                     }
-                }
-                
-                // 拦截删除配置指令
-                if url.host == "deleteconfig",
-                   let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-                   let queryItems = components.queryItems,
-                   let idStr = queryItems.first(where: { $0.name == "id" })?.value,
-                   let id = Int(idStr) {
                     
-                    DispatchQueue.main.async {
-                        if let appDelegate = AppDelegate.shared {
-                            appDelegate.confirmAndDeletePresetConfig(id: id)
+                    // 拦截删除配置指令
+                    if url.host == "deleteconfig",
+                       let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+                       let queryItems = components.queryItems,
+                       let idStr = queryItems.first(where: { $0.name == "id" })?.value,
+                       let id = Int(idStr) {
+                        
+                        DispatchQueue.main.async {
+                            if let appDelegate = AppDelegate.shared {
+                                appDelegate.confirmAndDeletePresetConfig(id: id)
+                            }
                         }
                     }
+                    
+                    decisionHandler(.cancel)
+                    return
                 }
                 
-                decisionHandler(.cancel)
+                // 仅允许 http, https 协议，拦截任何诸如 music://, itms-apps:// 等唤醒外部 App 的自定义协议
+                if scheme != "http" && scheme != "https" {
+                    decisionHandler(.cancel)
+                    return
+                }
+            }
+            
+            // 针对 Apple Music / App Store 这种在 http 协议下依然会触发 Universal Links 唤醒外部 App 的情况
+            // 我们通过 Swift 侧的直接 load(URLRequest) 触发，来强制在主页面网页内加载而不唤醒外部 App
+            if let host = url.host,
+               navigationAction.targetFrame?.isMainFrame == true,
+               (host.lowercased().contains("music.apple.com") || host.lowercased().contains("apps.apple.com")) {
+                
+                if bypassUniversalLinkForAppleMusic {
+                    bypassUniversalLinkForAppleMusic = false
+                    decisionHandler(.allow)
+                } else {
+                    bypassUniversalLinkForAppleMusic = true
+                    DispatchQueue.main.async {
+                        webView.load(URLRequest(url: url))
+                    }
+                    decisionHandler(.cancel)
+                }
                 return
             }
+            
             decisionHandler(.allow)
         }
         
