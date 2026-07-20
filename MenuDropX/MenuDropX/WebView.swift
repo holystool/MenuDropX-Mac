@@ -115,26 +115,45 @@ struct WebView: NSViewRepresentable {
                         targetTouches: [touch],
                         changedTouches: [touch]
                     });
-                    targetEl.dispatchEvent(touchEvent);
                 }
             } catch(e) {}
+            
+            // 监听右键菜单触发，获取选中文本实时传回 Swift，配合 willOpenMenu 原生右键菜单展示翻译
+            document.addEventListener('contextmenu', function() {
+                try {
+                    var selected = window.getSelection().toString();
+                    window.webkit.messageHandlers.menuDropXTranslate.postMessage({
+                        type: 'selection',
+                        text: selected || ''
+                    });
+                } catch(e) {}
+            });
         }
         """
         let infiniteScrollScript = WKUserScript(source: infiniteScrollJS, injectionTime: .atDocumentEnd, forMainFrameOnly: false)
         userContentController.addUserScript(infiniteScrollScript)
         
+        userContentController.add(context.coordinator, name: "menuDropXTranslate")
         configuration.userContentController = userContentController
         
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.customUserAgent = viewModel.isDesktopUA ? Self.desktopUserAgent : Self.mobileUserAgent
         
         // 绑定命令执行器，避开 SwiftUI updateNSView 延迟和调用竞态，实现即时瞬间响应
         viewModel.loadURLExecutor = { [weak webView] urlStr in
+            guard let webView = webView else { return }
+            
+            // 谷歌网页翻译（包含 translate.google.com 或 translate.goog）被请求时，
+            // 恢复系统默认原生 Safari UA，这能完美规避谷歌对模拟 Chrome 等第三方 UA 指纹的自动化脚本审计风控
+            let isGoogleTranslate = urlStr.contains("translate.google.com") || urlStr.contains("translate.goog")
+            webView.customUserAgent = isGoogleTranslate ? nil : (viewModel.isDesktopUA ? Self.desktopUserAgent : Self.mobileUserAgent)
+            
             if urlStr == "menudropx://home" {
-                webView?.loadHTMLString(Self.navigationHTML, baseURL: URL(string: "https://menudropx.local"))
+                webView.loadHTMLString(Self.navigationHTML, baseURL: URL(string: "https://menudropx.local"))
             } else if let url = URL(string: urlStr) {
-                webView?.load(URLRequest(url: url))
+                webView.load(URLRequest(url: url))
             }
         }
         viewModel.loadHomeExecutor = { [weak webView] in
@@ -152,6 +171,9 @@ struct WebView: NSViewRepresentable {
         }
         viewModel.reloadExecutor = { [weak webView] in
             webView?.reload()
+        }
+        viewModel.evaluateJSExecutor = { [weak webView] jsCode in
+            webView?.evaluateJavaScript(jsCode, completionHandler: nil)
         }
         
         // 监听 URL 与前进后退状态变化（KVO 可完美拦截 SPA 应用的 HTML5 History API 路由修改，如 pushState）
@@ -195,18 +217,19 @@ struct WebView: NSViewRepresentable {
         
         return webView
     }
-    
     func updateNSView(_ nsView: WKWebView, context: Context) {
-        // 检查并更新 User-Agent
-        let targetUA = viewModel.isDesktopUA ? Self.desktopUserAgent : Self.mobileUserAgent
-        if nsView.customUserAgent != targetUA {
+        // 只有当 isDesktopUA 状态真正发生改变时（比如用户在底栏点击了“切换浏览器标识”），
+        // 我们才更新 customUserAgent 并执行 nsView.reload()，彻底消除在加载/跳转过程中由于 URL 变化触发重载的冲突
+        if context.coordinator.lastIsDesktopUA != viewModel.isDesktopUA {
+            let targetUA = viewModel.isDesktopUA ? Self.desktopUserAgent : Self.mobileUserAgent
             nsView.customUserAgent = targetUA
-            // 如果是首次 SwiftUI updateNSView 绘制，跳过 reload()，因为 makeNSView 中刚刚加载过正确的 UA 网页
-            if !context.coordinator.isFirstUpdate {
+            
+            // 如果不是首次渲染，则重载以应用新的 UA 网页
+            if context.coordinator.lastIsDesktopUA != nil {
                 nsView.reload()
             }
+            context.coordinator.lastIsDesktopUA = viewModel.isDesktopUA
         }
-        context.coordinator.isFirstUpdate = false
         
         switch viewModel.action {
         case .none:
@@ -239,9 +262,11 @@ struct WebView: NSViewRepresentable {
         }
     }
     
-    class Coordinator: NSObject, WKNavigationDelegate {
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler, WKUIDelegate {
         var viewModel: WebViewModel
         var isFirstUpdate = true
+        var lastIsDesktopUA: Bool? = nil
+        var lastSelectedText: String = ""
         
         // 观察者生命周期持有者，防止出作用域被自动销毁
         var urlObservation: NSKeyValueObservation?
@@ -293,6 +318,7 @@ struct WebView: NSViewRepresentable {
                 self.viewModel.currentFaviconColor = nil
                 WebView.injectPresetsDataStatic(to: webView)
             }
+            self.viewModel.isPageTranslated = false
         }
         
         // 核心拦截跳转：监听 menudropx:// 自定义加载/清空配置协议并触发 Swift 对应操作
@@ -346,6 +372,346 @@ struct WebView: NSViewRepresentable {
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             DispatchQueue.main.async {
                 self.viewModel.isLoading = false
+            }
+        }
+        
+        // MARK: - WKScriptMessageHandler & 本地翻译多通道代理核心处理逻辑
+        
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "menuDropXTranslate",
+               let body = message.body as? [String: Any] {
+                
+                // 类型一：右键选中文本的实时同步暂存
+                if let type = body["type"] as? String, type == "selection" {
+                    if let text = body["text"] as? String {
+                        self.lastSelectedText = text
+                    }
+                    return
+                }
+                
+                // 类型二：增量翻译（用于 MutationObserver 滚动加载新内容）
+                if let type = body["type"] as? String, type == "incremental",
+                   let taskId = body["taskId"] as? String,
+                   let texts = body["texts"] as? [String] {
+                    translateTexts(texts, to: "zh-CN") { [weak self] translatedTexts in
+                        self?.applyIncrementalTranslations(translatedTexts, taskId: taskId)
+                    }
+                    return
+                }
+                
+                // 类型三：翻译整页的正文（首屏翻译）
+                if let type = body["type"] as? String, type == "full-page",
+                   let texts = body["texts"] as? [String] {
+                    DispatchQueue.main.async {
+                        self.viewModel.isTranslating = true
+                    }
+                    translateTexts(texts, to: "zh-CN") { [weak self] translatedTexts in
+                        self?.applyTranslationsToPage(translatedTexts)
+                    }
+                    return
+                }
+                
+                // 类型四：网页翻译状态回传同步
+                if let type = body["type"] as? String, type == "status" {
+                    if let isTrans = body["isTranslated"] as? Bool {
+                        DispatchQueue.main.async {
+                            self.viewModel.isPageTranslated = isTrans
+                        }
+                    }
+                    return
+                }
+            }
+        }
+        /// 翻译大文本数组的核心分片 (Chunk) + 并发受限 (Max Concurrent: 3)
+        private func translateTexts(_ texts: [String], to lang: String, completion: @escaping ([String]) -> Void) {
+            guard !texts.isEmpty else {
+                completion([])
+                return
+            }
+            
+            let filteredTexts = texts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            
+            // 分片打包，每包长度不超过 1500 字符（URL 长度限制考虑）
+            var chunks: [[String]] = []
+            var currentChunk: [String] = []
+            var currentLength = 0
+            
+            for text in filteredTexts {
+                let len = text.count
+                if currentLength + len > 1500 && !currentChunk.isEmpty {
+                    chunks.append(currentChunk)
+                    currentChunk = []
+                    currentLength = 0
+                }
+                currentChunk.append(text)
+                currentLength += len
+            }
+            if !currentChunk.isEmpty {
+                chunks.append(currentChunk)
+            }
+            
+            let totalChunks = chunks.count
+            var results: [Int: [String]] = [:]
+            
+            let queue = OperationQueue()
+            queue.maxConcurrentOperationCount = 3
+            
+            let mainFinishedGroup = DispatchGroup()
+            
+            for (index, chunk) in chunks.enumerated() {
+                mainFinishedGroup.enter()
+                
+                queue.addOperation {
+                    let innerGroup = DispatchGroup()
+                    innerGroup.enter()
+                    
+                    var tempResult: [String]? = nil
+                    
+                    // 通道一：请求 clients5.google.com
+                    self.requestGoogleTranslation(chunk, domain: "clients5.google.com", to: lang) { translatedTexts in
+                        if let translatedTexts = translatedTexts {
+                            tempResult = translatedTexts
+                            innerGroup.leave()
+                            return
+                        }
+                        
+                        // 通道一失败，降级切换至通道二：translate.googleapis.com
+                        self.requestGoogleTranslation(chunk, domain: "translate.googleapis.com", to: lang) { backupTranslated in
+                            if let backupTranslated = backupTranslated {
+                                tempResult = backupTranslated
+                            }
+                            innerGroup.leave()
+                        }
+                    }
+                    
+                    innerGroup.wait()
+                    results[index] = tempResult ?? chunk
+                    mainFinishedGroup.leave()
+                }
+            }
+            
+            mainFinishedGroup.notify(queue: .main) {
+                var finalResult: [String] = []
+                for i in 0..<totalChunks {
+                    if let res = results[i] {
+                        finalResult.append(contentsOf: res)
+                    }
+                }
+                completion(finalResult)
+            }
+        }
+        
+        /// 请求谷歌高信用特许 API 接口，利用多 q 参数直接映射，完全避免正则截断风险
+        private func requestGoogleTranslation(_ texts: [String], domain: String, to lang: String, completion: @escaping ([String]?) -> Void) {
+            var queryItems = [
+                URLQueryItem(name: "client", value: "dict-chrome-ex"),
+                URLQueryItem(name: "sl", value: "auto"),
+                URLQueryItem(name: "tl", value: lang)
+            ]
+            for text in texts {
+                queryItems.append(URLQueryItem(name: "q", value: text))
+            }
+            
+            var components = URLComponents()
+            components.scheme = "https"
+            components.host = domain
+            components.path = "/translate_a/t"
+            components.queryItems = queryItems
+            
+            guard let url = components.url else {
+                completion(nil)
+                return
+            }
+            
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            request.timeoutInterval = 8.0
+            
+            let randomOS = "10_15_\(Int.random(in: 4...7))"
+            let randomSafari = "605.1.\(Int.random(in: 12...15))"
+            let randomUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X \(randomOS)) AppleWebKit/\(randomSafari) (KHTML, like Gecko) Version/18.0 Safari/\(randomSafari)"
+            request.setValue(randomUA, forHTTPHeaderField: "User-Agent")
+            
+            URLSession.shared.dataTask(with: request) { data, _, _ in
+                if let data = data,
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [[Any]] {
+                    
+                    let translatedTexts = json.compactMap { $0.first as? String }
+                    // 确保返回的数组长度与请求的分片长度一致
+                    if translatedTexts.count == texts.count {
+                        completion(translatedTexts)
+                        return
+                    }
+                }
+                completion(nil)
+            }.resume()
+        }
+        
+        /// 将整页（首屏）翻译好的内容经 Base64 安全通道回填至网页 DOM 树中
+        private func applyTranslationsToPage(_ translatedTexts: [String]) {
+            let base64Texts = translatedTexts.map { $0.data(using: .utf8)?.base64EncodedString() ?? "" }
+            let jsArray = "[" + base64Texts.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+            
+            let jsCode = """
+            (function() {
+                var base64s = \(jsArray);
+                var activeItems = window.menuDropXActiveItems;
+                if (!activeItems || activeItems.length === 0 || base64s.length !== activeItems.length) return;
+                
+                function base64DecodeUTF8(base64) {
+                    var binString = window.atob(base64);
+                    var bytes = new Uint8Array(binString.length);
+                    for (var i = 0; i < binString.length; i++) {
+                        bytes[i] = binString.charCodeAt(i);
+                    }
+                    return new TextDecoder('utf-8').decode(bytes);
+                }
+                
+                for (var i = 0; i < activeItems.length; i++) {
+                    try {
+                        var decoded = base64DecodeUTF8(base64s[i]);
+                        var item = activeItems[i];
+                        if (item.type === 'text') {
+                            // 采用对照翻译模式，在原文后面换行追加中文，并补齐原文末尾的换行/空格以隔离下一段
+                            var trailing = "";
+                            var orig = item.el.menuDropXOriginalText || "";
+                            var match = orig.match(/\\s+$/);
+                            if (match) { trailing = match[0]; }
+                            item.el.nodeValue = orig + "\\n\\n" + decoded + trailing;
+                        } else if (item.type === 'container') {
+                            var transDiv = document.createElement('div');
+                            transDiv.className = 'menudropx-translated-text';
+                            transDiv.style.color = '#888888';
+                            transDiv.style.fontSize = '0.95em';
+                            transDiv.style.marginTop = '6px';
+                            transDiv.style.lineHeight = '1.4';
+                            transDiv.innerText = decoded;
+                            item.el.appendChild(transDiv);
+                        }
+                    } catch(e) {
+                        console.error("整页回填DOM出错:", e);
+                    }
+                }
+                window.menuDropXActiveItems = null;
+            })();
+            """
+            
+            DispatchQueue.main.async {
+                self.viewModel.evaluateJS(jsCode)
+                self.viewModel.isTranslating = false
+            }
+        }
+        
+        /// 将增量翻译好的内容通过 taskId 原路安全回填到页面的动态 DOM 树中
+        private func applyIncrementalTranslations(_ translatedTexts: [String], taskId: String) {
+            let base64Texts = translatedTexts.map { $0.data(using: .utf8)?.base64EncodedString() ?? "" }
+            let jsArray = "[" + base64Texts.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+            
+            let jsCode = """
+            (function() {
+                var base64s = \(jsArray);
+                var queue = window.menuDropXPendingQueue;
+                if (!queue || queue.length === 0) return;
+                
+                function base64DecodeUTF8(base64) {
+                    var binString = window.atob(base64);
+                    var bytes = new Uint8Array(binString.length);
+                    for (var i = 0; i < binString.length; i++) {
+                        bytes[i] = binString.charCodeAt(i);
+                    }
+                    return new TextDecoder('utf-8').decode(bytes);
+                }
+                
+                var taskIndex = -1;
+                for (var i = 0; i < queue.length; i++) {
+                    if (queue[i].id === "\(taskId)") {
+                        taskIndex = i;
+                        break;
+                    }
+                }
+                if (taskIndex === -1) return;
+                
+                var activeItems = queue[taskIndex].items;
+                if (!activeItems || activeItems.length === 0 || base64s.length !== activeItems.length) {
+                    queue.splice(taskIndex, 1);
+                    return;
+                }
+                
+                for (var i = 0; i < activeItems.length; i++) {
+                    try {
+                        var decoded = base64DecodeUTF8(base64s[i]);
+                        var item = activeItems[i];
+                        if (item.type === 'text') {
+                            // 采用对照翻译模式，在原文后面换行追加中文，并补齐原文末尾的换行/空格以隔离下一段
+                            var trailing = "";
+                            var orig = item.el.menuDropXOriginalText || "";
+                            var match = orig.match(/\\s+$/);
+                            if (match) { trailing = match[0]; }
+                            item.el.nodeValue = orig + "\\n\\n" + decoded + trailing;
+                        } else if (item.type === 'container') {
+                            var transDiv = document.createElement('div');
+                            transDiv.className = 'menudropx-translated-text';
+                            transDiv.style.color = '#888888';
+                            transDiv.style.fontSize = '0.95em';
+                            transDiv.style.marginTop = '6px';
+                            transDiv.style.lineHeight = '1.4';
+                            transDiv.innerText = decoded;
+                            item.el.appendChild(transDiv);
+                        }
+                    } catch(e) {
+                        console.error("增量回填DOM出错:", e);
+                    }
+                }
+                queue.splice(taskIndex, 1);
+            })();
+            """
+            
+            DispatchQueue.main.async {
+                self.viewModel.evaluateJS(jsCode)
+            }
+        }
+        
+        // MARK: - WKUIDelegate 自定义右键菜单翻译
+        
+        func webView(_ webView: WKWebView, willOpenMenu menu: NSMenu, with event: NSEvent) {
+            let selected = lastSelectedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !selected.isEmpty {
+                menu.insertItem(NSMenuItem.separator(), at: 0)
+                
+                let translateItem = NSMenuItem(title: "翻译所选内容", action: #selector(self.menuTranslateSelectedText(_:)), keyEquivalent: "")
+                translateItem.target = self
+                translateItem.representedObject = selected
+                menu.insertItem(translateItem, at: 0)
+            }
+        }
+        
+        @objc private func menuTranslateSelectedText(_ sender: NSMenuItem) {
+            guard let text = sender.representedObject as? String else { return }
+            
+            DispatchQueue.main.async {
+                self.viewModel.isTranslating = true
+            }
+            
+            // 调用我们写好的多通道网络翻译
+            translateTexts([text], to: "zh-CN") { [weak self] results in
+                DispatchQueue.main.async {
+                    self?.viewModel.isTranslating = false
+                    if let translated = results.first, !translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        // 使用标准的原生 NSAlert 展示翻译结果
+                        let alert = NSAlert()
+                        alert.messageText = "所选文本翻译结果"
+                        alert.informativeText = translated
+                        alert.alertStyle = .informational
+                        alert.addButton(withTitle: "确定")
+                        
+                        // 尝试附加到当前活动的主窗口上，使其以 Sheet 形式优雅滑出
+                        if let window = NSApp.keyWindow {
+                            alert.beginSheetModal(for: window, completionHandler: nil)
+                        } else {
+                            alert.runModal()
+                        }
+                    }
+                }
             }
         }
         

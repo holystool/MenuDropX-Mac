@@ -124,12 +124,225 @@ struct ContentView: View {
             // 底部精致状态栏
             Divider()
             HStack(spacing: 8) {
-                // 左侧显示当前的 UA 类型
-                Text(viewModel.isDesktopUA ? "桌面模式" : "手机模式")
+                // 左侧显示当前的 UA 类型（正在翻译时动态切换为高亮提示）
+                Text(viewModel.isTranslating ? "正在翻译..." : (viewModel.isDesktopUA ? "桌面模式" : "手机模式"))
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(viewModel.isTranslating ? .accentColor : .secondary)
                 
                 Spacer()
+                
+                // 网页翻译按钮
+                let hasValidURL = !viewModel.urlInput.isEmpty && viewModel.urlInput != "menudropx://home"
+                let isBtnDisabled = !hasValidURL || viewModel.isTranslating
+                Button(action: {
+                    let jsCode = """
+                    (function() {
+                        var IGNORE_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'IFRAME', 'CODE', 'PRE', 'TEXTAREA']);
+                        
+                        // 1. 如果当前已经是“翻译”状态，点击则执行一秒瞬时倒带（无感恢复原文）
+                        if (window.menuDropXIsTranslated) {
+                            // 恢复所有的普通 TextNode 原始文本
+                            if (window.menuDropXActiveNodesBackup) {
+                                window.menuDropXActiveNodesBackup.forEach(function(node) {
+                                    if (node && node.menuDropXOriginalText !== undefined) {
+                                        node.nodeValue = node.menuDropXOriginalText;
+                                    }
+                                });
+                            }
+                            
+                            // 移去所有动态追加的对照翻译 Div 节点
+                            var transDivs = document.querySelectorAll('.menudropx-translated-text');
+                            transDivs.forEach(function(el) { el.remove(); });
+                            
+                            // 清除所有容器节点的 data-translated-container 标记
+                            var containers = document.querySelectorAll('[data-translated-container]');
+                            containers.forEach(function(el) { el.removeAttribute('data-translated-container'); });
+                            
+                            // 断开 MutationObserver，静默停止滚动监听
+                            if (window.menuDropXObserver) {
+                                window.menuDropXObserver.disconnect();
+                                window.menuDropXObserver = null;
+                            }
+                            
+                            // 移除点击事件监听
+                            if (window.menuDropXClickHandler) {
+                                document.removeEventListener('click', window.menuDropXClickHandler, true);
+                                window.menuDropXClickHandler = null;
+                            }
+                            
+                            window.menuDropXPendingQueue = [];
+                            window.menuDropXActiveNodesBackup = [];
+                            window.menuDropXIsTranslated = false;
+                            
+                            // 同步更新 Swift 侧的状态栏按钮颜色
+                            window.webkit.messageHandlers.menuDropXTranslate.postMessage({
+                                type: 'status',
+                                isTranslated: false
+                            });
+                            return;
+                        }
+                        
+
+                        // 只翻译主体为英文的文本（ASCII字母占比 > 40%）
+                        function isEnglishText(text) {
+                            if (!text || text.length < 2) return false;
+                            var letters = (text.match(/[a-zA-Z]/g) || []).length;
+                            return letters / text.length > 0.4;
+                        }
+                        
+                        // 3. 递归文本节点收集（在游离节点上备份 OriginalText 供双向倒带还原）
+                        if (!window.menuDropXActiveNodesBackup) {
+                            window.menuDropXActiveNodesBackup = [];
+                        }
+                        
+                        function collectTextNodes(node, nodes, containerSet) {
+                            if (node.nodeType === Node.ELEMENT_NODE) {
+                                var tagName = node.tagName.toUpperCase();
+                                if (IGNORE_TAGS.has(tagName) || node.isContentEditable) { return; }
+                                if (containerSet && containerSet.has(node)) { return; }
+                                
+                                // X/Reddit 容器：已翻译过则跳过整个子树，否则继续递归
+                                var isX = node.getAttribute && node.getAttribute('data-testid') === 'tweetText';
+                                var isReddit = node.classList && (node.classList.contains('RichTextJSON-root') || node.getAttribute && node.getAttribute('data-click-id') === 'text');
+                                if ((isX || isReddit) && node.getAttribute('data-translated-container')) {
+                                    return; // 已翻译，跳过
+                                }
+                            }
+                            
+                            if (node.nodeType === Node.TEXT_NODE) {
+                                var val = node.nodeValue.trim();
+                                // 只收集主体为英文的文本节点
+                                if (isEnglishText(val)) {
+                                    if (node.menuDropXOriginalText === undefined) {
+                                        node.menuDropXOriginalText = node.nodeValue;
+                                        window.menuDropXActiveNodesBackup.push(node);
+                                        nodes.push({ type: 'text', el: node, text: node.nodeValue });
+                                    } else if (node.menuDropXOriginalText !== node.nodeValue) {
+                                        // 检查这是否是我们自己添加双语对照导致的变化
+                                        // 如果当前 nodeValue 刚好是以 "原文 + 换行" 开头，说明这是我们刚回填的，忽略它以打破无限循环
+                                        if (node.nodeValue.indexOf(node.menuDropXOriginalText + "\\n\\n") === 0) {
+                                            return;
+                                        }
+                                        
+                                        // 否则就是 React 在原地修改了文本节点（例如 X 展开 "Show more"）
+                                        // 则更新备份并重新送译
+                                        node.menuDropXOriginalText = node.nodeValue;
+                                        nodes.push({ type: 'text', el: node, text: node.nodeValue });
+                                    }
+                                }
+                                return;
+                            }
+                            
+                            var child = node.firstChild;
+                            while (child) {
+                                collectTextNodes(child, nodes, containerSet);
+                                child = child.nextSibling;
+                            }
+                        }
+                        
+                        var allActiveItems = [];
+                        collectTextNodes(document.body, allActiveItems, null);
+                        
+                        if (allActiveItems.length > 0) {
+                            window.menuDropXActiveItems = allActiveItems;
+                            var texts = allActiveItems.map(function(item) { return item.text; });
+                            
+                            window.menuDropXIsTranslated = true;
+                            window.webkit.messageHandlers.menuDropXTranslate.postMessage({
+                                type: 'status',
+                                isTranslated: true
+                            });
+                            
+                            window.webkit.messageHandlers.menuDropXTranslate.postMessage({
+                                type: 'full-page',
+                                texts: texts
+                            });
+                        }
+                        
+                        // 4. 注册 MutationObserver，监视无限滚动并自动在后台增量翻译新内容
+                        if (window.menuDropXObserver) {
+                            window.menuDropXObserver.disconnect();
+                        }
+                        
+                        var observer = new MutationObserver(function(mutations) {
+                            var incrementalNodes = [];
+                            mutations.forEach(function(mutation) {
+                                if (mutation.type === 'childList') {
+                                    mutation.addedNodes.forEach(function(addedNode) {
+                                        collectTextNodes(addedNode, incrementalNodes, null);
+                                    });
+                                } else if (mutation.type === 'characterData') {
+                                    collectTextNodes(mutation.target, incrementalNodes, null);
+                                }
+                            });
+                            
+                            if (incrementalNodes.length > 0) {
+                                if (!window.menuDropXPendingQueue) {
+                                    window.menuDropXPendingQueue = [];
+                                }
+                                var taskId = "task_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5);
+                                window.menuDropXPendingQueue.push({
+                                    id: taskId,
+                                    items: incrementalNodes
+                                });
+                                
+                                var texts = incrementalNodes.map(function(item) { return item.text; });
+                                window.webkit.messageHandlers.menuDropXTranslate.postMessage({
+                                    type: 'incremental',
+                                    taskId: taskId,
+                                    texts: texts
+                                });
+                            }
+                        });
+                        
+                        observer.observe(document.body, {
+                            childList: true,
+                            subtree: true,
+                            characterData: true
+
+                        });
+                        
+                        // 5. 监听点击事件，处理 X "显示更多" 展开后回滚为英文的问题
+                        if (!window.menuDropXClickHandler) {
+                            window.menuDropXClickHandler = function() {
+                                if (!window.menuDropXIsTranslated) return;
+                                
+                                function scanNewNodes() {
+                                    var newNodes = [];
+                                    collectTextNodes(document.body, newNodes, null);
+                                    if (newNodes.length > 0) {
+                                        if (!window.menuDropXPendingQueue) {
+                                            window.menuDropXPendingQueue = [];
+                                        }
+                                        var taskId = "task_" + Date.now() + "_click";
+                                        window.menuDropXPendingQueue.push({ id: taskId, items: newNodes });
+                                        window.webkit.messageHandlers.menuDropXTranslate.postMessage({
+                                            type: 'incremental',
+                                            taskId: taskId,
+                                            texts: newNodes.map(function(n) { return n.text; })
+                                        });
+                                    }
+                                }
+                                
+                                // 多级延时兜底，应对不同网络环境下的展开渲染延迟
+                                setTimeout(scanNewNodes, 400);
+                                setTimeout(scanNewNodes, 800);
+                                setTimeout(scanNewNodes, 1500);
+                            };
+                            document.addEventListener('click', window.menuDropXClickHandler, true);
+                        }
+                        window.menuDropXObserver = observer;
+                    })();
+                    """
+                    viewModel.evaluateJS(jsCode)
+                }) {
+                    Image(systemName: "translate")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(hasValidURL ? (viewModel.isPageTranslated ? .accentColor : .primary) : .secondary.opacity(0.4))
+                }
+                .buttonStyle(ControlButtonStyle(isDisabled: isBtnDisabled))
+                .disabled(isBtnDisabled)
+                .help("翻译当前网页（双向切换）")
                 
                 // 浏览器标识切换按钮
                 Button(action: {

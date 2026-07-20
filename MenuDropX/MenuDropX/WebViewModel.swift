@@ -45,6 +45,12 @@ class WebViewModel: ObservableObject {
     @Published var canGoBack: Bool = false
     @Published var canGoForward: Bool = false
     
+    // 是否正在翻译过程中，用于驱动 UI 展示加载状态
+    @Published var isTranslating: Bool = false
+    
+    // 当前页面是否已被翻译过（用于底栏按钮变蓝状态及双向还原逻辑）
+    @Published var isPageTranslated: Bool = false
+    
     // 网页控制动作枚举，用于单向命令传递
     enum WebAction: Equatable {
         case none
@@ -64,6 +70,7 @@ class WebViewModel: ObservableObject {
     var goBackExecutor: (() -> Void)?
     var goForwardExecutor: (() -> Void)?
     var reloadExecutor: (() -> Void)?
+    var evaluateJSExecutor: ((String) -> Void)?
 
     // 供 AppDelegate 监听的 Pin 状态改变回调
     var onPinChanged: ((Bool) -> Void)?
@@ -105,6 +112,7 @@ class WebViewModel: ObservableObject {
         } else {
             action = .reload
         }
+        isPageTranslated = false
     }
     
     /// 返回主页
@@ -114,6 +122,7 @@ class WebViewModel: ObservableObject {
         } else {
             action = .loadHome
         }
+        isPageTranslated = false
     }
     
     /// 加载指定的 URL 地址
@@ -132,5 +141,11 @@ class WebViewModel: ObservableObject {
         } else {
             action = .load(cleanURL)
         }
+        isPageTranslated = false
+    }
+    
+    /// 执行自定义的 JavaScript 脚本，直接作用于底层的真实网页中
+    func evaluateJS(_ jsCode: String) {
+        evaluateJSExecutor?(jsCode)
     }
 }
