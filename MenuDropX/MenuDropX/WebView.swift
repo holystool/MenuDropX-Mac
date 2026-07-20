@@ -1315,10 +1315,17 @@ extension WebView {
                 }
                 return first;
             }
-            window.handleIconError = function(img, name, domain, colorKey) {
+            window.handleIconError = function(img, name, domain, colorKey, index) {
                 if (!img.dataset.triedGoogle) {
                     img.dataset.triedGoogle = "true";
-                    img.src = `https://www.google.com/s2/favicons?sz=128&domain=${domain}`;
+                    const fallbackUrl = `https://www.google.com/s2/favicons?sz=128&domain=${domain}`;
+                    img.src = fallbackUrl;
+                    
+                    // 将成功加载的 Google Favicon 地址保存回对应的数据卡片上，防止下次渲染再次触发加载延迟与白屏
+                    if (index !== undefined && index !== null && sites[index]) {
+                        sites[index].resolvedIcon = fallbackUrl;
+                        saveData();
+                    }
                 } else {
                     img.style.display = 'none';
                     const parent = img.parentNode;
@@ -1493,10 +1500,10 @@ extension WebView {
                                 </div>
                             `;
                         } else {
-                            const favSrc = `https://${site.domain}/favicon.ico`;
+                            const favSrc = site.resolvedIcon || `https://${site.domain}/favicon.ico`;
                             iconHtml = `
                                 <div class="icon-container">
-                                    <img src="${favSrc}" onerror="handleIconError(this, '${site.name}', '${site.domain}', '${site.iconColor || ''}')">
+                                    <img src="${favSrc}" onerror="handleIconError(this, '${site.name}', '${site.domain}', '${site.iconColor || ''}', ${index})">
                                 </div>
                             `;
                         }
