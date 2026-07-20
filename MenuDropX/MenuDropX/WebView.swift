@@ -963,6 +963,12 @@ extension WebView {
                 animation-duration: 0.23s;
                 animation-delay: 0.05s;
             }
+            .site-card.dragging {
+                opacity: 0.5;
+                transform: scale(0.95);
+                border: 1px dashed #3b82f6;
+                animation: none !important;
+            }
             .modal-overlay {
                 position: fixed;
                 top: 0;
@@ -1136,6 +1142,29 @@ extension WebView {
                 color: var(--text-secondary);
                 transition: color 0.2s ease;
             }
+            .color-picker {
+                display: flex;
+                gap: 8px;
+                margin-top: 6px;
+                margin-bottom: 6px;
+            }
+            .color-option {
+                width: 24px;
+                height: 24px;
+                border-radius: 50%;
+                cursor: pointer;
+                border: 2px solid transparent;
+                transition: all 0.15s ease;
+                box-sizing: border-box;
+            }
+            .color-option:hover {
+                transform: scale(1.1);
+            }
+            .color-option.selected {
+                border-color: var(--text-color);
+                box-shadow: 0 0 4px rgba(59, 130, 246, 0.5);
+                transform: scale(1.1);
+            }
         </style>
     </head>
     <body>
@@ -1160,7 +1189,7 @@ extension WebView {
         </div>
         <div class="modal-overlay" id="addModal">
             <div class="modal-content">
-                <h3 class="modal-title">添加自定义网站</h3>
+                <h3 class="modal-title" id="modalTitle">添加自定义网站</h3>
                 <div class="form-group">
                     <label for="siteName">网站名称</label>
                     <input type="text" id="siteName" placeholder="例如: 百度" autocomplete="off">
@@ -1169,9 +1198,25 @@ extension WebView {
                     <label for="siteUrl">网站网址</label>
                     <input type="text" id="siteUrl" placeholder="例如: baidu.com" autocomplete="off">
                 </div>
+                <div class="form-group">
+                    <label for="siteIconText">文字图标 (可选，如：百 或 BD)</label>
+                    <input type="text" id="siteIconText" placeholder="最多2个字母/1个中文字，留空则获取图标" autocomplete="off" maxlength="2">
+                </div>
+                <div class="form-group">
+                    <label>文字图标背景 (可选)</label>
+                    <div class="color-picker" id="colorPicker">
+                        <div class="color-option selected" data-color="" onclick="setSelectedColor('')" style="background: linear-gradient(135deg, #9ca3af, #6b7280);" title="自动"></div>
+                        <div class="color-option" data-color="red" onclick="setSelectedColor('red')" style="background: linear-gradient(135deg, #ff2442, #ff527b);" title="红色"></div>
+                        <div class="color-option" data-color="orange" onclick="setSelectedColor('orange')" style="background: linear-gradient(135deg, #ffe411, #fbc02d);" title="橙色"></div>
+                        <div class="color-option" data-color="green" onclick="setSelectedColor('green')" style="background: linear-gradient(135deg, #1aad19, #2ba245);" title="绿色"></div>
+                        <div class="color-option" data-color="blue" onclick="setSelectedColor('blue')" style="background: linear-gradient(135deg, #3b82f6, #1d4ed8);" title="蓝色"></div>
+                        <div class="color-option" data-color="purple" onclick="setSelectedColor('purple')" style="background: linear-gradient(135deg, #8b5cf6, #6d28d9);" title="紫色"></div>
+                        <div class="color-option" data-color="grey" onclick="setSelectedColor('grey')" style="background: linear-gradient(135deg, #4b5563, #1f2937);" title="灰色"></div>
+                    </div>
+                </div>
                 <div class="modal-actions">
                     <button class="btn btn-cancel" onclick="closeModal()">取消</button>
-                    <button class="btn btn-submit" onclick="submitSite()">添加</button>
+                    <button class="btn btn-submit" id="submitBtn" onclick="submitSite()">添加</button>
                 </div>
             </div>
         </div>
@@ -1231,7 +1276,14 @@ extension WebView {
                     localStorage.setItem("menudropx_sites", JSON.stringify(sites));
                 } catch(e) {}
             }
-            function getGradientForName(name) {
+            function getGradientForName(name, colorKey) {
+                if (colorKey === "red") return "linear-gradient(135deg, #ff2442, #ff527b)";
+                if (colorKey === "orange") return "linear-gradient(135deg, #ffe411, #fbc02d)";
+                if (colorKey === "green") return "linear-gradient(135deg, #1aad19, #2ba245)";
+                if (colorKey === "blue") return "linear-gradient(135deg, #3b82f6, #1d4ed8)";
+                if (colorKey === "purple") return "linear-gradient(135deg, #8b5cf6, #6d28d9)";
+                if (colorKey === "grey") return "linear-gradient(135deg, #4b5563, #1f2937)";
+                
                 if (!name) return "linear-gradient(135deg, #9ca3af, #6b7280)";
                 if (name.includes("小红书")) return "linear-gradient(135deg, #ff2442, #ff527b)";
                 if (name.includes("即刻")) return "linear-gradient(135deg, #ffe411, #fbc02d)";
@@ -1263,14 +1315,14 @@ extension WebView {
                 }
                 return first;
             }
-            window.handleIconError = function(img, name, domain) {
+            window.handleIconError = function(img, name, domain, colorKey) {
                 if (!img.dataset.triedGoogle) {
                     img.dataset.triedGoogle = "true";
                     img.src = `https://www.google.com/s2/favicons?sz=128&domain=${domain}`;
                 } else {
                     img.style.display = 'none';
                     const parent = img.parentNode;
-                    parent.style.background = getGradientForName(name);
+                    parent.style.background = getGradientForName(name, colorKey);
                     parent.style.color = '#ffffff';
                     parent.style.fontSize = '18px';
                     parent.style.fontWeight = '700';
@@ -1290,9 +1342,43 @@ extension WebView {
                 }
                 render();
             };
+            let draggedIndex = -1;
+            window.dragStart = function(event, element, index) {
+                if (!isEditing) return;
+                draggedIndex = index;
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", index);
+                setTimeout(() => {
+                    element.classList.add("dragging");
+                }, 0);
+            };
+            window.dragEnd = function(event, element) {
+                element.classList.remove("dragging");
+                draggedIndex = -1;
+            };
+            window.dragOver = function(event) {
+                if (!isEditing) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+            };
+            window.drop = function(event, targetIndex) {
+                if (!isEditing) return;
+                event.preventDefault();
+                if (draggedIndex === -1 || draggedIndex === targetIndex) return;
+                
+                const temp = sites[draggedIndex];
+                sites[draggedIndex] = sites[targetIndex];
+                sites[targetIndex] = temp;
+                
+                saveData();
+                render();
+            };
             window.handleCardClick = function(index) {
-                if (isEditing) return;
                 const site = sites[index];
+                if (isEditing) {
+                    openModal(index);
+                    return;
+                }
                 if (site) {
                     window.location.href = site.url;
                 } else {
@@ -1305,10 +1391,42 @@ extension WebView {
                 saveData();
                 render();
             };
+            
+            let selectedColor = "";
+            window.setSelectedColor = function(color) {
+                selectedColor = color;
+                const options = document.querySelectorAll(".color-option");
+                options.forEach(opt => {
+                    if (opt.getAttribute("data-color") === color) {
+                        opt.classList.add("selected");
+                    } else {
+                        opt.classList.remove("selected");
+                    }
+                });
+            };
+            
             function openModal(index) {
                 currentAddIndex = index;
-                document.getElementById("siteName").value = "";
-                document.getElementById("siteUrl").value = "";
+                const site = sites[index];
+                const modalTitle = document.getElementById("modalTitle");
+                const submitBtn = document.getElementById("submitBtn");
+                
+                if (site) {
+                    modalTitle.innerText = "编辑自定义网站";
+                    submitBtn.innerText = "保存修改";
+                    document.getElementById("siteName").value = site.name || "";
+                    document.getElementById("siteUrl").value = site.url || "";
+                    document.getElementById("siteIconText").value = site.iconText || "";
+                    setSelectedColor(site.iconColor || "");
+                } else {
+                    modalTitle.innerText = "添加自定义网站";
+                    submitBtn.innerText = "添加";
+                    document.getElementById("siteName").value = "";
+                    document.getElementById("siteUrl").value = "";
+                    document.getElementById("siteIconText").value = "";
+                    setSelectedColor("");
+                }
+                
                 document.getElementById("addModal").style.display = "flex";
                 document.getElementById("siteName").focus();
             }
@@ -1319,6 +1437,8 @@ extension WebView {
             window.submitSite = function() {
                 const nameInput = document.getElementById("siteName").value.trim();
                 let urlInput = document.getElementById("siteUrl").value.trim();
+                let iconTextVal = document.getElementById("siteIconText").value.trim();
+                
                 if (!nameInput || !urlInput) {
                     alert("请填写完整的网站名称和网址");
                     return;
@@ -1333,10 +1453,23 @@ extension WebView {
                 } catch(e) {
                     domain = urlInput;
                 }
+                
+                // 限制文字图标：1个中文 或 最多2个英文
+                if (iconTextVal) {
+                    const isChinese = /[^\\x00-\\xff]/.test(iconTextVal);
+                    if (isChinese) {
+                        iconTextVal = iconTextVal.substring(0, 1);
+                    } else {
+                        iconTextVal = iconTextVal.substring(0, 2);
+                    }
+                }
+                
                 sites[currentAddIndex] = {
                     name: nameInput,
                     url: urlInput,
-                    domain: domain
+                    domain: domain,
+                    iconText: iconTextVal || undefined,
+                    iconColor: selectedColor || undefined
                 };
                 saveData();
                 closeModal();
@@ -1352,20 +1485,41 @@ extension WebView {
                 sites.forEach((site, index) => {
                     if (site) {
                         const classes = ["site-card", isEditing ? "editing shake-card" : ""].filter(Boolean).join(" ");
-                        const favSrc = `https://${site.domain}/favicon.ico`;
-                        container.innerHTML += `
-                            <a class="${classes}" onclick="handleCardClick(${index})">
-                                <div class="delete-badge" onclick="deleteSite(event, ${index})">×</div>
-                                <div class="icon-container">
-                                    <img src="${favSrc}" onerror="handleIconError(this, '${site.name}', '${site.domain}')">
+                        let iconHtml = "";
+                        if (site.iconText) {
+                            iconHtml = `
+                                <div class="icon-container" style="background: ${getGradientForName(site.name, site.iconColor)}; color: #ffffff; font-size: 18px; font-weight: 700; text-shadow: 0 1px 2px rgba(0,0,0,0.15);">
+                                    ${site.iconText}
                                 </div>
+                            `;
+                        } else {
+                            const favSrc = `https://${site.domain}/favicon.ico`;
+                            iconHtml = `
+                                <div class="icon-container">
+                                    <img src="${favSrc}" onerror="handleIconError(this, '${site.name}', '${site.domain}', '${site.iconColor || ''}')">
+                                </div>
+                            `;
+                        }
+                        container.innerHTML += `
+                            <a class="${classes}" 
+                               draggable="${isEditing ? 'true' : 'false'}"
+                               ondragstart="dragStart(event, this, ${index})" 
+                               ondragend="dragEnd(event, this)" 
+                               ondragover="dragOver(event)" 
+                               ondrop="drop(event, ${index})"
+                               onclick="handleCardClick(${index})">
+                                <div class="delete-badge" onclick="deleteSite(event, ${index})">×</div>
+                                ${iconHtml}
                                 <div class="site-name">${site.name}</div>
                             </a>
                         `;
                     } else {
                         const classes = ["site-card", "empty", isEditing ? "editing" : ""].filter(Boolean).join(" ");
                         container.innerHTML += `
-                            <a class="${classes}" onclick="handleCardClick(${index})">
+                            <a class="${classes}" 
+                               ondragover="dragOver(event)" 
+                               ondrop="drop(event, ${index})"
+                               onclick="handleCardClick(${index})">
                                 <div class="icon-container">+</div>
                                 <div class="site-name">添加</div>
                             </a>
