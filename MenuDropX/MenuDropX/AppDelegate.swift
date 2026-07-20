@@ -32,6 +32,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // 启动时自动创建第一个默认实例
         createNewInstance()
+        
+        // 启动时自动检查更新
+        checkForUpdates()
+    }
+    
+    /// 自动检查 GitHub 最新 Release 版本并提醒跳转下载
+    func checkForUpdates() {
+        let githubOwner = "holystool"
+        let githubRepo = "MenuDropX-Mac"
+        
+        let apiURLString = "https://api.github.com/repos/\(githubOwner)/\(githubRepo)/releases/latest"
+        guard let url = URL(string: apiURLString) else { return }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 8.0
+        // GitHub API 强制要求设置 User-Agent，否则会拦截返回 403
+        request.setValue("MenuDropX-mac-UpdateChecker", forHTTPHeaderField: "User-Agent")
+        
+        URLSession.shared.dataTask(with: request) { data, _, error in
+            if error != nil { return }
+            guard let data = data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tagName = json["tag_name"] as? String,
+                  let htmlUrlString = json["html_url"] as? String,
+                  let htmlURL = URL(string: htmlUrlString) else { return }
+            
+            // 获取当前软件的本地版本号
+            let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+            
+            // 清理 tag_name 的 "v" 前缀（例如 "v1.1.0" -> "1.1.0"）
+            let cleanTagName = tagName.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "v"))
+            
+            // 按照数字版本号规则对比：如果线上版本号 > 当前运行版本号
+            if cleanTagName.compare(currentVersion, options: .numeric) == .orderedDescending {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "发现新版本 \(tagName)"
+                    
+                    // 获取 GitHub Release 的描述作为更新说明
+                    let bodyText = json["body"] as? String ?? "无更新说明。"
+                    alert.informativeText = "当前版本: \(currentVersion)\n最新版本: \(cleanTagName)\n\n更新日志:\n\(bodyText)"
+                    
+                    alert.addButton(withTitle: "前往下载")
+                    alert.addButton(withTitle: "以后再说")
+                    alert.alertStyle = .informational
+                    
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        // 唤醒默认浏览器打开 GitHub Release 网页
+                        NSWorkspace.shared.open(htmlURL)
+                    }
+                }
+            }
+        }.resume()
     }
     
     /// 创建并添加一个新的浏览器实例
