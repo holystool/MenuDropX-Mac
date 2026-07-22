@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8" />
+  <!-- 移动端自适应：禁止用户缩放，视口宽度跟随设备 -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#ffffff" />
+  <title>JustNote · 极简便签</title>
+
+  <style>
+    /* ============================================================
+       全局重置 & 极简主义基调
+       只使用黑 / 白 / 灰线条与文字，无阴影、无圆角、无渐变
+       ============================================================ */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+      /* 移动端去掉点击高亮 */
+    }
+
+    :root {
+      --line: #000;
+      /* 主线条 / 文字：纯黑 */
+      --gray: #888;
+      /* 次要灰 */
+      --gray-light: #ccc;
+      /* 浅灰线条 */
+      --bg: #fff;
+      /* 背景：纯白 */
+      --gap: 16px;
+      /* 统一间距 */
+    }
+
+    html,
+    body {
+      background: var(--bg);
+      color: var(--line);
+      font-family: -apple-system, "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      font-size: 15px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* 页面主容器：居中，限制最大宽度，响应式填充 */
+    .app {
+      max-width: 640px;
+      margin: 0 auto;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      border-left: 1px solid var(--gray-light);
+      border-right: 1px solid var(--gray-light);
+    }
+
+    /* ---------- 顶部标题栏 ---------- */
+    .app-header {
+      padding: var(--gap);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+
+    .app-header h1 {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 1px;
+    }
+
+    .app-header .count {
+      font-size: 12px;
+      color: var(--gray);
+    }
+
+    /* ---------- 新建便签按钮（横条状） ---------- */
+    .add-bar {
+      display: block;
+      width: 100%;
+      padding: 14px;
+      background: var(--bg);
+      color: var(--line);
+      border: none;
+      border-top: 1px solid var(--line);
+      font-size: 15px;
+      font-family: inherit;
+      letter-spacing: 1px;
+      cursor: pointer;
+      text-align: center;
+    }
+
+    .add-bar:active {
+      background: var(--line);
+      /* 点击时反色反馈 */
+      color: var(--bg);
+    }
+
+    /* ---------- 便签列表容器 ---------- */
+    .note-list {
+      flex: 1;
+      padding: var(--gap);
+      display: flex;
+      flex-direction: column;
+      gap: var(--gap);
+    }
+
+    /* ---------- 单个便签 ---------- */
+    .note {
+      border: 1px solid var(--line);
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* 便签头部：格式工具栏 + 删除按钮 */
+    .note-toolbar {
+      display: flex;
+      align-items: center;
+      border-bottom: 1px solid var(--gray-light);
+    }
+
+    /* 格式化按钮组，可横向滚动以适配窄屏 */
+    .fmt-tools {
+      flex: 1;
+      display: flex;
+      overflow-x: auto;
+    }
+
+    .fmt-tools::-webkit-scrollbar {
+      display: none;
+    }
+
+    /* 隐藏滚动条 */
+
+    .fmt-btn {
+      flex: 0 0 auto;
+      min-width: 40px;
+      padding: 8px 10px;
+      background: var(--bg);
+      border: none;
+      border-right: 1px solid var(--gray-light);
+      color: var(--line);
+      font-family: inherit;
+      font-size: 14px;
+      line-height: 1;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .fmt-btn:active {
+      background: var(--line);
+      color: var(--bg);
+    }
+
+    /* 让按钮文字直观展示各自的格式效果 */
+    .fmt-btn.is-bold {
+      font-weight: 700;
+    }
+
+    .fmt-btn.is-italic {
+      font-style: italic;
+    }
+
+    .fmt-btn.is-under {
+      text-decoration: underline;
+    }
+
+    .fmt-btn.is-strike {
+      text-decoration: line-through;
+    }
+
+    /* ---------- 段落样式下拉菜单（大 / 小 / 正文） ---------- */
+    .fmt-dropdown {
+      position: relative;
+      flex: 0 0 auto;
+      display: flex;
+    }
+
+    .fmt-menu {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      z-index: 20;
+      min-width: 100px;
+      background: var(--bg);
+      border: 1px solid var(--line);
+    }
+
+    .fmt-dropdown.open .fmt-menu {
+      display: block;
+      /* 展开状态 */
+    }
+
+    .fmt-menu-item {
+      display: block;
+      width: 100%;
+      padding: 10px 14px;
+      background: var(--bg);
+      border: none;
+      border-bottom: 1px solid var(--gray-light);
+      color: var(--line);
+      font-family: inherit;
+      text-align: left;
+      line-height: 1.2;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .fmt-menu-item:last-child {
+      border-bottom: none;
+    }
+
+    .fmt-menu-item:active {
+      background: var(--line);
+      color: var(--bg);
+    }
+
+    /* 菜单项文字预览各自样式 */
+    .fmt-menu-item.opt-h1 {
+      font-size: 20px;
+      font-weight: 700;
+    }
+
+    .fmt-menu-item.opt-h2 {
+      font-size: 16px;
+      font-weight: 700;
+    }
+
+    .fmt-menu-item.opt-p {
+      font-size: 14px;
+    }
+
+    /* 删除按钮（极简 ×） */
+    .note-del {
+      flex: 0 0 auto;
+      width: 40px;
+      align-self: stretch;
+      background: var(--bg);
+      border: none;
+      border-left: 1px solid var(--gray-light);
+      color: var(--gray);
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .note-del:active {
+      background: var(--line);
+      color: var(--bg);
+    }
+
+    /* 便签编辑区：核心为正方形（1:1） */
+    .note-editor-wrap {
+      position: relative;
+      width: 100%;
+      padding-top: 100%;
+      /* 让容器保持正方形 */
+    }
+
+    /* 富文本编辑器：所见即所得，实时显示格式 */
+    .note-editor {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      padding: var(--gap);
+      overflow-y: auto;
+      outline: none;
+      background: var(--bg);
+      color: var(--line);
+      font-size: 15px;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    /* 空编辑器占位提示（contenteditable 无原生 placeholder） */
+    .note-editor:empty:before {
+      content: attr(data-placeholder);
+      color: var(--gray-light);
+    }
+
+    /* ---------- 编辑器内富文本元素的极简样式 ---------- */
+    .note-editor h1 {
+      font-size: 22px;
+      font-weight: 700;
+      margin: 0.3em 0;
+      line-height: 1.3;
+    }
+
+    .note-editor h2 {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 0.3em 0;
+      line-height: 1.3;
+    }
+
+    .note-editor p,
+    .note-editor div {
+      margin: 0.15em 0;
+    }
+
+    .note-editor ul,
+    .note-editor ol {
+      margin: 0.3em 0;
+      padding-left: 1.4em;
+    }
+
+    .note-editor b,
+    .note-editor strong {
+      font-weight: 700;
+    }
+
+    .note-editor i,
+    .note-editor em {
+      font-style: italic;
+    }
+
+    .note-editor u {
+      text-decoration: underline;
+    }
+
+    .note-editor s,
+    .note-editor strike {
+      text-decoration: line-through;
+    }
+
+    /* ---------- 清单（checklist）样式 ---------- */
+    .checklist-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      margin: 0.15em 0;
+    }
+
+    /* 复选框：不可编辑，点击切换勾选状态 */
+    .check-box {
+      flex: 0 0 auto;
+      width: 16px;
+      height: 16px;
+      margin-top: 3px;
+      border: 1px solid var(--line);
+      cursor: pointer;
+      position: relative;
+      user-select: none;
+    }
+
+    .checklist-item.checked .check-box {
+      background: var(--line);
+    }
+
+    .checklist-item.checked .check-box:after {
+      content: "✓";
+      position: absolute;
+      top: -3px;
+      left: 2px;
+      font-size: 13px;
+      color: var(--bg);
+    }
+
+    /* 勾选后的文本：变灰并加中划线 */
+    .checklist-item.checked {
+      color: var(--gray);
+      text-decoration: line-through;
+    }
+
+    .checklist-text {
+      flex: 1;
+      min-width: 0;
+    }
+
+    /* ---------- 底部说明 ---------- */
+    .app-footer {
+      padding: var(--gap);
+      border-top: 1px solid var(--gray-light);
+      font-size: 11px;
+      color: var(--gray);
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="app">
+    <!-- 顶部标题栏 -->
+    <header class="app-header">
+      <h1>JUSTNOTE</h1>
+      <span class="count" id="noteCount">0 条便签</span>
+    </header>
+
+    <!-- 便签列表：由 JS 动态渲染 -->
+    <main class="note-list" id="noteList"></main>
+
+    <!-- 新建便签按钮（横条状，位于便签列表下方） -->
+    <button class="add-bar" id="addBtn">＋ 新建便签</button>
+
+    <!-- 底部说明 -->
+    <footer class="app-footer">内容实时保存在本地浏览器 · 关闭页面不会丢失</footer>
+  </div>
+
+  <script>
+    /* ============================================================
+       JustNote — 极简移动端便签应用（富文本 / 所见即所得）
+       原生 HTML5 + CSS3 + Vanilla JavaScript，无第三方框架
+       编辑器：contenteditable，实时显示加粗/斜体/标题/列表/清单等格式
+       数据持久化：localStorage（保存为 HTML 片段）
+       ============================================================ */
+
+    'use strict';
+
+    // localStorage 存储键名
+    const STORAGE_KEY = 'justnote.notes';
+
+    // DOM 引用
+    const noteListEl = document.getElementById('noteList');
+    const addBtn = document.getElementById('addBtn');
+    const countEl = document.getElementById('noteCount');
+
+    /**
+     * 内存中的便签数据模型
+     * 每条便签结构：{ id: string, html: string }（html 为富文本内容）
+     * @type {Array<{id: string, html: string}>}
+     */
+    let notes = [];
+
+    /* ---------------------------------------------------------
+       数据读写：localStorage
+       --------------------------------------------------------- */
+
+    /** 从 localStorage 读取便签，失败或为空时返回 null */
+    function loadNotes() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : null;
+      } catch (e) {
+        console.warn('读取本地便签失败：', e);
+        return null;
+      }
+    }
+
+    /** 将当前便签数据写入 localStorage */
+    function saveNotes() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
+      } catch (e) {
+        console.warn('保存本地便签失败：', e);
+      }
+    }
+
+    /** 生成一个简单的唯一 ID */
+    function genId() {
+      return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+    }
+
+    /* ---------------------------------------------------------
+       格式工具栏配置
+       cmd    —— 使用 document.execCommand 执行的行内命令
+       block  —— 使用 formatBlock 切换的块级标签（标题 / 正文）
+       action —— 自定义动作（清单）
+       --------------------------------------------------------- */
+    const FMT_TOOLS = [
+      { label: 'B', title: '加粗', cmd: 'bold', cls: 'is-bold' },
+      { label: 'I', title: '斜体', cmd: 'italic', cls: 'is-italic' },
+      { label: 'U', title: '下划线', cmd: 'underline', cls: 'is-under' },
+      { label: 'S', title: '中划线', cmd: 'strikeThrough', cls: 'is-strike' },
+      { label: '• ', title: '无序列表', cmd: 'insertUnorderedList' },
+      { label: '☑ ', title: '清单', action: 'checklist' }
+    ];
+
+    /* 段落样式下拉项：合并「大标题 / 小标题 / 正文」为一个按钮 */
+    const STYLE_OPTIONS = [
+      { label: '大标题', title: '大标题', block: 'H1', cls: 'opt-h1' },
+      { label: '小标题', title: '小标题', block: 'H2', cls: 'opt-h2' },
+      { label: '正文', title: '正文', block: 'P', cls: 'opt-p' }
+    ];
+
+    /** 创建一个清单项 DOM */
+    function createChecklistItem(contentHtml) {
+      const item = document.createElement('div');
+      item.className = 'checklist-item';
+      // 复选框：不可编辑，点击切换状态
+      const box = document.createElement('span');
+      box.className = 'check-box';
+      box.setAttribute('contenteditable', 'false');
+      // 文本容器：可编辑
+      const text = document.createElement('span');
+      text.className = 'checklist-text';
+      text.innerHTML = contentHtml != null && contentHtml !== '' ? contentHtml : '<br>';
+      item.appendChild(box);
+      item.appendChild(text);
+      return item;
+    }
+
+    /**
+     * 将选中文字转为清单项；选中跨越多行时自动每行一个清单项
+     * 关键：contenteditable 中首行往往是直接的文本节点（未被 <div> 包裹），
+     *      后续行才包在 <div> 里。因此这里遍历编辑器的「所有直接子节点」
+     *      （含文本节点），再按视觉行分组，避免首行被漏掉。
+     */
+    function insertChecklistItem() {
+      var sel = window.getSelection();
+      if (!sel || sel.rangeCount === 0) return;
+      var range = sel.getRangeAt(0);
+
+      var editor = findEditor(range);
+      if (!editor) return;
+
+      // 无选区 → 新建空白清单项
+      if (range.collapsed) {
+        var item = createChecklistItem();
+        range.insertNode(item);
+        placeCaretInside(item.querySelector('.checklist-text'));
+        return;
+      }
+
+      var BLOCK_TAGS = ['DIV', 'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'BLOCKQUOTE', 'LI'];
+      var children = Array.from(editor.childNodes); // 包含文本节点
+
+      // 从任意节点向上找到它在编辑器下的顶层直接子节点
+      function topLevelNode(node) {
+        while (node && node.parentNode !== editor) node = node.parentNode;
+        return node;
+      }
+
+      var startTop = topLevelNode(range.startContainer);
+      var endTop = topLevelNode(range.endContainer);
+      var startIdx = children.indexOf(startTop);
+      var endIdx = children.indexOf(endTop);
+
+      if (startIdx === -1 || endIdx === -1) {
+        replaceWithChecklistItems(range); // 降级
+        return;
+      }
+      if (startIdx > endIdx) { var tmpI = startIdx; startIdx = endIdx; endIdx = tmpI; }
+
+      // 受影响的顶层节点（覆盖选区的所有行）
+      var affected = children.slice(startIdx, endIdx + 1);
+
+      // 辅助判断
+      function isBlock(n) { return n.nodeType === 1 && BLOCK_TAGS.indexOf(n.tagName) !== -1; }
+      function isBr(n) { return n.nodeType === 1 && n.tagName === 'BR'; }
+
+      // 将受影响节点按「视觉行」分组：
+      //   - 块级元素（div/p/标题）自成一行
+      //   - <br> 作为行分隔符
+      //   - 连续的文本/内联节点聚合为一行
+      var lines = [];
+      var buffer = [];
+      function flush() { if (buffer.length) { lines.push(buffer); buffer = []; } }
+
+      affected.forEach(function (node) {
+        if (isBlock(node)) {
+          flush();
+          lines.push([node]);
+        } else if (isBr(node)) {
+          flush();
+        } else {
+          buffer.push(node);
+        }
+      });
+      flush();
+
+      if (lines.length === 0) {
+        replaceWithChecklistItems(range);
+        return;
+      }
+
+      // 求每行的 HTML 内容
+      function lineHtml(nodes) {
+        if (nodes.length === 1 && isBlock(nodes[0])) {
+          return cleanHtml(nodes[0].innerHTML);
+        }
+        var box = document.createElement('div');
+        nodes.forEach(function (n) { box.appendChild(n.cloneNode(true)); });
+        return cleanHtml(box.innerHTML);
+      }
+
+      var items = lines.map(function (nodes) {
+        return createChecklistItem(lineHtml(nodes));
+      });
+
+      // 在第一个受影响节点之前插入所有清单项
+      var fragment = document.createDocumentFragment();
+      items.forEach(function (it) { fragment.appendChild(it); });
+      editor.insertBefore(fragment, affected[0]);
+
+      // 移除受影响的原节点
+      affected.forEach(function (n) {
+        if (n.parentNode === editor) editor.removeChild(n);
+      });
+
+      // 聚焦到最后一个清单项
+      var last = items[items.length - 1];
+      placeCaretInside(last.querySelector('.checklist-text'));
+    }
+
+    /** 通过 extractContents() 从选区提取内容并创建清单项（降级路径） */
+    function replaceWithChecklistItems(range) {
+      var content = range.extractContents();
+      var tmp = document.createElement('div');
+      tmp.appendChild(content);
+      var html = cleanHtml(tmp.innerHTML);
+      var item = createChecklistItem(html);
+      range.insertNode(item);
+      placeCaretInside(item.querySelector('.checklist-text'));
+    }
+
+    /**
+     * 从 range 向上查找最近的 .note-editor 容器
+     * @param {Range} range
+     * @returns {HTMLElement|null}
+     */
+    function findEditor(range) {
+      var node = range.commonAncestorContainer;
+      while (node) {
+        if (node.nodeType === Node.ELEMENT_NODE && node.classList.contains('note-editor')) {
+          return node;
+        }
+        node = node.parentNode;
+      }
+      return null;
+    }
+
+    /** 清理 HTML：去首尾空白 & 尾部 <br> */
+    function cleanHtml(html) {
+      return html.replace(/(<br\s*\/?>)*$/i, '').trim();
+    }
+
+    /** 将光标定位到指定元素内部起始处 */
+    function placeCaretInside(el) {
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+
+    /** 从某个节点向上查找所属的清单项（限定在编辑器内） */
+    function closestChecklistItem(node, editor) {
+      while (node && node !== editor) {
+        if (node.nodeType === 1 && node.classList.contains('checklist-item')) {
+          return node;
+        }
+        node = node.parentNode;
+      }
+      return null;
+    }
+
+    /* ---------------------------------------------------------
+       通用格式化执行
+       --------------------------------------------------------- */
+
+    /**
+     * 对指定编辑器执行某个格式化操作
+     * @param {HTMLElement} editor  contenteditable 编辑器
+     * @param {object} tool         配置项（含 cmd / block / action 属性）
+     */
+    function applyFormat(editor, tool) {
+      editor.focus();
+      if (tool.action === 'checklist') {
+        insertChecklistItem();
+      } else if (tool.block) {
+        document.execCommand('formatBlock', false, tool.block);
+      } else if (tool.cmd) {
+        document.execCommand(tool.cmd, false, null);
+      }
+      // 操作后同步保存
+      persistEditor(editor);
+    }
+
+    /* ---------------------------------------------------------
+       段落样式下拉菜单
+       --------------------------------------------------------- */
+
+    /** 关闭页面上所有已展开的样式菜单 */
+    function closeAllMenus() {
+      const opened = document.querySelectorAll('.fmt-dropdown.open');
+      opened.forEach(function (el) { el.classList.remove('open'); });
+    }
+
+    /**
+     * 创建「样式」下拉按钮（大标题 / 小标题 / 正文）
+     * @param {HTMLElement} editor  当前便签的编辑器
+     * @returns {HTMLElement}
+     */
+    function createStyleDropdown(editor) {
+      const wrap = document.createElement('div');
+      wrap.className = 'fmt-dropdown';
+
+      // 触发按钮：点击展开 / 收起
+      const trigger = document.createElement('button');
+      trigger.className = 'fmt-btn';
+      trigger.type = 'button';
+      trigger.textContent = '样式 ▾';
+      trigger.title = '段落样式';
+      trigger.addEventListener('mousedown', function (e) {
+        e.preventDefault(); // 保留编辑器选区
+        const isOpen = wrap.classList.contains('open');
+        closeAllMenus();
+        if (!isOpen) wrap.classList.add('open');
+      });
+
+      // 下拉菜单
+      const menu = document.createElement('div');
+      menu.className = 'fmt-menu';
+      STYLE_OPTIONS.forEach(function (opt) {
+        const item = document.createElement('button');
+        item.className = 'fmt-menu-item ' + opt.cls;
+        item.type = 'button';
+        item.textContent = opt.label;
+        item.title = opt.title;
+        item.addEventListener('mousedown', function (e) {
+          e.preventDefault();
+          applyFormat(editor, opt);
+          wrap.classList.remove('open'); // 选择后收起
+        });
+        menu.appendChild(item);
+      });
+
+      wrap.appendChild(trigger);
+      wrap.appendChild(menu);
+      return wrap;
+    }
+
+    /* ---------------------------------------------------------
+       渲染：把 notes 数据渲染成 DOM
+       --------------------------------------------------------- */
+
+    /**
+     * 创建单个便签的 DOM 节点
+     * @param {{id: string, html: string}} note
+     * @returns {HTMLElement}
+     */
+    function createNoteEl(note) {
+      const noteEl = document.createElement('section');
+      noteEl.className = 'note';
+      noteEl.dataset.id = note.id;
+
+      // ---------- 工具栏 ----------
+      const toolbar = document.createElement('div');
+      toolbar.className = 'note-toolbar';
+
+      const tools = document.createElement('div');
+      tools.className = 'fmt-tools';
+
+      // 编辑器需先创建，供按钮回调引用
+      const editor = document.createElement('div');
+      editor.className = 'note-editor';
+      editor.setAttribute('contenteditable', 'true');
+      editor.setAttribute('data-placeholder', '写点什么…');
+      editor.innerHTML = note.html || '';
+
+      FMT_TOOLS.forEach(function (tool) {
+        const btn = document.createElement('button');
+        btn.className = 'fmt-btn' + (tool.cls ? ' ' + tool.cls : '');
+        btn.type = 'button';
+        btn.textContent = tool.label;
+        btn.title = tool.title;
+        // 用 mousedown + preventDefault，避免编辑器失焦丢失选区
+        btn.addEventListener('mousedown', function (e) {
+          e.preventDefault();
+          applyFormat(editor, tool);
+        });
+        tools.appendChild(btn);
+      });
+
+      // 删除按钮
+      const delBtn = document.createElement('button');
+      delBtn.className = 'note-del';
+      delBtn.type = 'button';
+      delBtn.textContent = '×';
+      delBtn.title = '删除便签';
+      delBtn.addEventListener('click', function () {
+        deleteNote(note.id);
+      });
+
+      toolbar.appendChild(createStyleDropdown(editor));
+      toolbar.appendChild(tools);
+      toolbar.appendChild(delBtn);
+
+      // ---------- 正方形富文本编辑区 ----------
+      const editorWrap = document.createElement('div');
+      editorWrap.className = 'note-editor-wrap';
+
+      // 实时监听输入：同步到内存 + 保存 localStorage
+      editor.addEventListener('input', function () {
+        persistEditor(editor);
+      });
+
+      // 点击复选框：切换清单项勾选状态
+      editor.addEventListener('click', function (e) {
+        if (e.target.classList && e.target.classList.contains('check-box')) {
+          const item = e.target.parentNode;
+          item.classList.toggle('checked');
+          persistEditor(editor);
+        }
+      });
+
+      // 回车键在清单项内的特殊处理：新建下一项 / 空项退出清单
+      editor.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter') return;
+        const sel = window.getSelection();
+        if (!sel || sel.rangeCount === 0) return;
+        const item = closestChecklistItem(sel.anchorNode, editor);
+        if (!item) return;
+
+        e.preventDefault();
+        const text = (item.querySelector('.checklist-text') || item).textContent.trim();
+        if (text === '') {
+          // 空清单项：退出清单，插入普通段落
+          const p = document.createElement('div');
+          p.innerHTML = '<br>';
+          item.replaceWith(p);
+          placeCaretInside(p);
+        } else {
+          // 非空：在下方新建一个清单项
+          const next = createChecklistItem();
+          item.after(next);
+          placeCaretInside(next.querySelector('.checklist-text'));
+        }
+        persistEditor(editor);
+      });
+
+      editorWrap.appendChild(editor);
+
+      // 组装
+      noteEl.appendChild(toolbar);
+      noteEl.appendChild(editorWrap);
+      return noteEl;
+    }
+
+    /** 把编辑器当前 HTML 同步到数据并保存 */
+    function persistEditor(editor) {
+      const id = editor.closest('.note').dataset.id;
+      const note = notes.find(function (n) { return n.id === id; });
+      if (note) {
+        note.html = editor.innerHTML;
+        saveNotes();
+      }
+    }
+
+    /** 全量渲染便签列表 */
+    function render() {
+      noteListEl.innerHTML = '';
+      notes.forEach(function (note) {
+        noteListEl.appendChild(createNoteEl(note));
+      });
+      updateCount();
+    }
+
+    /** 更新顶部便签计数 */
+    function updateCount() {
+      countEl.textContent = notes.length + ' 条便签';
+    }
+
+    /* ---------------------------------------------------------
+       操作：新增 / 删除
+       --------------------------------------------------------- */
+
+    /** 新增一个空白便签，并聚焦到它 */
+    function addNote() {
+      const note = { id: genId(), html: '' };
+      notes.push(note);
+      saveNotes();
+
+      // 增量渲染，避免打断其他便签的编辑焦点
+      const el = createNoteEl(note);
+      noteListEl.appendChild(el);
+      updateCount();
+
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const editor = el.querySelector('.note-editor');
+      if (editor) editor.focus();
+    }
+
+    /**
+     * 删除指定 id 的便签
+     * @param {string} id
+     */
+    function deleteNote(id) {
+      notes = notes.filter(function (n) { return n.id !== id; });
+      // 删空后自动补一个空白便签，保证界面不空
+      if (notes.length === 0) {
+        notes.push({ id: genId(), html: '' });
+      }
+      saveNotes();
+      render();
+    }
+
+    /* ---------------------------------------------------------
+       初始化
+       --------------------------------------------------------- */
+    function init() {
+      const stored = loadNotes();
+      if (stored && stored.length > 0) {
+        // 兼容旧版纯文本 / Markdown 数据：若无 html 字段则用 text 兜底
+        notes = stored.map(function (n) {
+          return { id: n.id || genId(), html: n.html != null ? n.html : (n.text || '') };
+        });
+      } else {
+        notes = [{ id: genId(), html: '' }];
+        saveNotes();
+      }
+      render();
+
+      addBtn.addEventListener('click', addNote);
+
+      // 点击菜单以外的区域时收起样式下拉菜单
+      document.addEventListener('mousedown', function (e) {
+        if (!e.target.closest('.fmt-dropdown')) closeAllMenus();
+      });
+    }
+
+    // 启动应用
+    init();
+  </script>
+</body>
+
+</html>

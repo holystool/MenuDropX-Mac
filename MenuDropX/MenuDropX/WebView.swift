@@ -6,11 +6,40 @@ struct WebView: NSViewRepresentable {
     
     @ObservedObject var viewModel: WebViewModel
     
-    // 移动端 User-Agent 常量
-    static let mobileUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+    // 移动端 User-Agent 常量（标准 iOS 18.1 Safari UA，无矛盾 Build 号）
+    static let mobileUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/604.1"
     
     // 桌面端 User-Agent 常量
     static let desktopUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+    
+    /// 判断目标 Host 或 URL 是否属于风控极严的高敏感域名（敏感域名强制还原为 macOS 原生 Safari UA 以确保绝对安全）
+    static func isSensitiveDomain(_ hostOrURLStr: String) -> Bool {
+        let lower = hostOrURLStr.lowercased()
+        let sensitiveDomains = [
+            "instagram.com",
+            "facebook.com",
+            "meta.com",
+            "google.com",
+            "accounts.google.com",
+            "x.com",
+            "twitter.com",
+            "tiktok.com",
+            "xiaohongshu.com",
+            "xhslink.com",
+            "weibo.com",
+            "weibo.cn"
+        ]
+        return sensitiveDomains.contains { lower.contains($0) }
+    }
+    
+    /// 根据目标 URL 与 UI 状态确定适用的 customUserAgent（敏感域名强制为 nil 还原 macOS 原生 UA）
+    static func determineUserAgent(for urlStr: String, isDesktopUA: Bool) -> String? {
+        if isSensitiveDomain(urlStr) {
+            return nil // 敏感域名：不论当前属于什么 UI 模式，强制 100% 锁定为系统原生 macOS Safari UA
+        }
+        // 当处于默认桌面/原生模式（isDesktopUA == true）时，使用 nil 直接继承系统原生 macOS Safari UA
+        return isDesktopUA ? nil : Self.mobileUserAgent
+    }
     
     func makeCoordinator() -> Coordinator {
         Coordinator(viewModel)
@@ -139,16 +168,13 @@ struct WebView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
-        webView.customUserAgent = viewModel.isDesktopUA ? Self.desktopUserAgent : Self.mobileUserAgent
+        let initialURLString = viewModel.urlInput
+        webView.customUserAgent = WebView.determineUserAgent(for: initialURLString, isDesktopUA: viewModel.isDesktopUA)
         
         // 绑定命令执行器，避开 SwiftUI updateNSView 延迟和调用竞态，实现即时瞬间响应
         viewModel.loadURLExecutor = { [weak webView] urlStr in
             guard let webView = webView else { return }
-            
-            // 谷歌网页翻译（包含 translate.google.com 或 translate.goog）被请求时，
-            // 恢复系统默认原生 Safari UA，这能完美规避谷歌对模拟 Chrome 等第三方 UA 指纹的自动化脚本审计风控
-            let isGoogleTranslate = urlStr.contains("translate.google.com") || urlStr.contains("translate.goog")
-            webView.customUserAgent = isGoogleTranslate ? nil : (viewModel.isDesktopUA ? Self.desktopUserAgent : Self.mobileUserAgent)
+            webView.customUserAgent = WebView.determineUserAgent(for: urlStr, isDesktopUA: viewModel.isDesktopUA)
             
             if urlStr == "menudropx://home" {
                 webView.loadHTMLString(Self.navigationHTML, baseURL: URL(string: "https://menudropx.local"))
@@ -205,10 +231,14 @@ struct WebView: NSViewRepresentable {
         WebView.activeWebViews.append(WeakWKWebView(webView, viewModel: viewModel))
         WebView.activeWebViews.removeAll { $0.webView == nil }
         
-        // 初始加载：优先读取 viewModel.urlInput（恢复配置时已预置真实 URL），否则加载默认首页
-        let initialURLString = viewModel.urlInput
+        // 初始加载：优先读取 initialURLString（恢复配置时已预置真实 URL），否则加载默认首页
         if initialURLString.isEmpty || initialURLString == "menudropx://home" {
             webView.loadHTMLString(Self.navigationHTML, baseURL: URL(string: "https://menudropx.local"))
+        } else if initialURLString.hasPrefix("menudropx://plugin/") {
+            let filename = initialURLString.replacingOccurrences(of: "menudropx://plugin/", with: "")
+            webView.loadHTMLString(Self.loadPluginHTML(name: filename), baseURL: URL(string: "https://menudropx.local/plugin/\(filename)"))
+        } else if initialURLString == "menudropx://justnote" {
+            webView.loadHTMLString(Self.loadPluginHTML(name: "JustNote"), baseURL: URL(string: "https://menudropx.local/justnote"))
         } else if let url = URL(string: initialURLString) {
             webView.load(URLRequest(url: url))
         } else {
@@ -221,8 +251,8 @@ struct WebView: NSViewRepresentable {
         // 只有当 isDesktopUA 状态真正发生改变时（比如用户在底栏点击了“切换浏览器标识”），
         // 我们才更新 customUserAgent 并执行 nsView.reload()，彻底消除在加载/跳转过程中由于 URL 变化触发重载的冲突
         if context.coordinator.lastIsDesktopUA != viewModel.isDesktopUA {
-            let targetUA = viewModel.isDesktopUA ? Self.desktopUserAgent : Self.mobileUserAgent
-            nsView.customUserAgent = targetUA
+            let currentURL = nsView.url?.absoluteString ?? viewModel.urlInput
+            nsView.customUserAgent = WebView.determineUserAgent(for: currentURL, isDesktopUA: viewModel.isDesktopUA)
             
             // 如果不是首次渲染，则重载以应用新的 UA 网页
             if context.coordinator.lastIsDesktopUA != nil {
@@ -247,6 +277,11 @@ struct WebView: NSViewRepresentable {
         case .load(let urlString):
             if urlString == "menudropx://home" {
                 nsView.loadHTMLString(Self.navigationHTML, baseURL: URL(string: "https://menudropx.local"))
+            } else if urlString.hasPrefix("menudropx://plugin/") {
+                let filename = urlString.replacingOccurrences(of: "menudropx://plugin/", with: "")
+                nsView.loadHTMLString(Self.loadPluginHTML(name: filename), baseURL: URL(string: "https://menudropx.local/plugin/\(filename)"))
+            } else if urlString == "menudropx://justnote" {
+                nsView.loadHTMLString(Self.loadPluginHTML(name: "JustNote"), baseURL: URL(string: "https://menudropx.local/justnote"))
             } else if let url = URL(string: urlString) {
                 let request = URLRequest(url: url)
                 nsView.load(request)
@@ -314,7 +349,7 @@ struct WebView: NSViewRepresentable {
                         // 如果有自定义文字图标，直接生成，跳过 favicon 下载
                         self.updateMenuIconToText(text: text, name: self.viewModel.pendingTextIconName ?? "", colorKey: self.viewModel.pendingTextIconColor ?? "")
                     } else {
-                        self.fetchFavicon(for: host) { [weak self] colorImg, templateImg in
+                        self.fetchFavicon(for: host, webView: webView) { [weak self] colorImg, templateImg in
                             DispatchQueue.main.async {
                                 self?.viewModel.currentFaviconColor = colorImg
                                 self?.viewModel.currentFavicon = templateImg
@@ -330,17 +365,30 @@ struct WebView: NSViewRepresentable {
             let isHomePage = webView.url?.host == "menudropx.local"
             
             if isHomePage {
-                // 本地导航首页：清空 URL 栏和图标，并注入最新的预设配置数据
-                self.viewModel.urlInput = ""
-                self.viewModel.currentFavicon = nil
-                self.viewModel.currentFaviconColor = nil
-                self.viewModel.pendingTextIcon = nil
-                self.viewModel.pendingTextIconName = nil
-                self.viewModel.pendingTextIconColor = nil
-                self.viewModel.pendingTextIconDomain = nil
-                WebView.injectPresetsDataStatic(to: webView)
+                if let path = webView.url?.path, path.hasPrefix("/plugin/") || path == "/justnote" {
+                    let filename = path == "/justnote" ? "JustNote" : path.replacingOccurrences(of: "/plugin/", with: "")
+                    
+                    // 便签或其他本地 HTML 插件页面：同步显示对应插件菜单栏图标
+                    self.viewModel.urlInput = filename == "JustNote" ? "menudropx://justnote" : "menudropx://plugin/\(filename)"
+                    
+                    let displayName = filename == "JustNote" ? "便签" : filename
+                    self.viewModel.pendingTextIcon = displayName
+                    self.viewModel.pendingTextIconName = displayName
+                    self.viewModel.pendingTextIconColor = "grey"
+                    self.viewModel.pendingTextIconDomain = "plugin-\(filename.lowercased())"
+                    self.updateMenuIconToText(text: displayName, name: displayName, colorKey: "grey")
+                } else {
+                    // 本地导航首页：清空 URL 栏和图标，并注入最新的预设配置数据
+                    self.viewModel.urlInput = ""
+                    self.viewModel.currentFavicon = nil
+                    self.viewModel.currentFaviconColor = nil
+                    self.viewModel.pendingTextIcon = nil
+                    self.viewModel.pendingTextIconName = nil
+                    self.viewModel.pendingTextIconColor = nil
+                    self.viewModel.pendingTextIconDomain = nil
+                    WebView.injectPresetsDataStatic(to: webView)
+                }
             }
-            self.viewModel.isPageTranslated = false
         }
         
         // 核心拦截跳转：监听 menudropx:// 自定义加载/清空配置协议并触发 Swift 对应操作，以及阻断 Universal Links 唤醒外部 App
@@ -350,8 +398,23 @@ struct WebView: NSViewRepresentable {
                 return
             }
             
+            // 动态判定并同步更新当前域名的 User-Agent（敏感域名强制为 nil 还原原生 Safari UA）
+            let currentURLStr = url.absoluteString
+            webView.customUserAgent = WebView.determineUserAgent(for: currentURLStr, isDesktopUA: self.viewModel.isDesktopUA)
+            
             if let scheme = url.scheme {
                 if scheme == "menudropx" {
+                    // 拦截通用本地插件及便签页面跳转
+                    if url.host == "plugin" || url.host == "justnote" {
+                        let filename = url.host == "justnote" ? "JustNote" : url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                        DispatchQueue.main.async {
+                            let htmlContent = WebView.loadPluginHTML(name: filename)
+                            webView.loadHTMLString(htmlContent, baseURL: URL(string: "https://menudropx.local/plugin/\(filename)"))
+                        }
+                        decisionHandler(.cancel)
+                        return
+                    }
+                    
                     // 拦截加载配置指令
                     if url.host == "loadconfig",
                        let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -441,39 +504,7 @@ struct WebView: NSViewRepresentable {
                     return
                 }
                 
-                // 类型二：增量翻译（用于 MutationObserver 滚动加载新内容）
-                if let type = body["type"] as? String, type == "incremental",
-                   let taskId = body["taskId"] as? String,
-                   let texts = body["texts"] as? [String] {
-                    translateTexts(texts, to: "zh-CN") { [weak self] translatedTexts in
-                        self?.applyIncrementalTranslations(translatedTexts, taskId: taskId)
-                    }
-                    return
-                }
-                
-                // 类型三：翻译整页的正文（首屏翻译）
-                if let type = body["type"] as? String, type == "full-page",
-                   let texts = body["texts"] as? [String] {
-                    DispatchQueue.main.async {
-                        self.viewModel.isTranslating = true
-                    }
-                    translateTexts(texts, to: "zh-CN") { [weak self] translatedTexts in
-                        self?.applyTranslationsToPage(translatedTexts)
-                    }
-                    return
-                }
-                
-                // 类型四：网页翻译状态回传同步
-                if let type = body["type"] as? String, type == "status" {
-                    if let isTrans = body["isTranslated"] as? Bool {
-                        DispatchQueue.main.async {
-                            self.viewModel.isPageTranslated = isTrans
-                        }
-                    }
-                    return
-                }
-                
-                // 类型五：点击自定义文字图标卡片时，实时推送给 Swift 同步至菜单栏图标
+                // 类型二：点击自定义文字图标卡片时，实时推送给 Swift 同步至菜单栏图标
                 if let type = body["type"] as? String, type == "updateActiveIcon" {
                     let name = body["name"] as? String ?? ""
                     let iconText = body["iconText"] as? String ?? ""
@@ -617,130 +648,6 @@ struct WebView: NSViewRepresentable {
             }.resume()
         }
         
-        /// 将整页（首屏）翻译好的内容经 Base64 安全通道回填至网页 DOM 树中
-        private func applyTranslationsToPage(_ translatedTexts: [String]) {
-            let base64Texts = translatedTexts.map { $0.data(using: .utf8)?.base64EncodedString() ?? "" }
-            let jsArray = "[" + base64Texts.map { "\"\($0)\"" }.joined(separator: ",") + "]"
-            
-            let jsCode = """
-            (function() {
-                var base64s = \(jsArray);
-                var activeItems = window.menuDropXActiveItems;
-                if (!activeItems || activeItems.length === 0 || base64s.length !== activeItems.length) return;
-                
-                function base64DecodeUTF8(base64) {
-                    var binString = window.atob(base64);
-                    var bytes = new Uint8Array(binString.length);
-                    for (var i = 0; i < binString.length; i++) {
-                        bytes[i] = binString.charCodeAt(i);
-                    }
-                    return new TextDecoder('utf-8').decode(bytes);
-                }
-                
-                for (var i = 0; i < activeItems.length; i++) {
-                    try {
-                        var decoded = base64DecodeUTF8(base64s[i]);
-                        var item = activeItems[i];
-                        if (item.type === 'text') {
-                            // 采用对照翻译模式，在原文后面换行追加中文，并补齐原文末尾的换行/空格以隔离下一段
-                            var trailing = "";
-                            var orig = item.el.menuDropXOriginalText || "";
-                            var match = orig.match(/\\s+$/);
-                            if (match) { trailing = match[0]; }
-                            item.el.nodeValue = orig + "\\n\\n" + decoded + trailing;
-                        } else if (item.type === 'container') {
-                            var transDiv = document.createElement('div');
-                            transDiv.className = 'menudropx-translated-text';
-                            transDiv.style.color = '#888888';
-                            transDiv.style.fontSize = '0.95em';
-                            transDiv.style.marginTop = '6px';
-                            transDiv.style.lineHeight = '1.4';
-                            transDiv.innerText = decoded;
-                            item.el.appendChild(transDiv);
-                        }
-                    } catch(e) {
-                        console.error("整页回填DOM出错:", e);
-                    }
-                }
-                window.menuDropXActiveItems = null;
-            })();
-            """
-            
-            DispatchQueue.main.async {
-                self.viewModel.evaluateJS(jsCode)
-                self.viewModel.isTranslating = false
-            }
-        }
-        
-        /// 将增量翻译好的内容通过 taskId 原路安全回填到页面的动态 DOM 树中
-        private func applyIncrementalTranslations(_ translatedTexts: [String], taskId: String) {
-            let base64Texts = translatedTexts.map { $0.data(using: .utf8)?.base64EncodedString() ?? "" }
-            let jsArray = "[" + base64Texts.map { "\"\($0)\"" }.joined(separator: ",") + "]"
-            
-            let jsCode = """
-            (function() {
-                var base64s = \(jsArray);
-                var queue = window.menuDropXPendingQueue;
-                if (!queue || queue.length === 0) return;
-                
-                function base64DecodeUTF8(base64) {
-                    var binString = window.atob(base64);
-                    var bytes = new Uint8Array(binString.length);
-                    for (var i = 0; i < binString.length; i++) {
-                        bytes[i] = binString.charCodeAt(i);
-                    }
-                    return new TextDecoder('utf-8').decode(bytes);
-                }
-                
-                var taskIndex = -1;
-                for (var i = 0; i < queue.length; i++) {
-                    if (queue[i].id === "\(taskId)") {
-                        taskIndex = i;
-                        break;
-                    }
-                }
-                if (taskIndex === -1) return;
-                
-                var activeItems = queue[taskIndex].items;
-                if (!activeItems || activeItems.length === 0 || base64s.length !== activeItems.length) {
-                    queue.splice(taskIndex, 1);
-                    return;
-                }
-                
-                for (var i = 0; i < activeItems.length; i++) {
-                    try {
-                        var decoded = base64DecodeUTF8(base64s[i]);
-                        var item = activeItems[i];
-                        if (item.type === 'text') {
-                            // 采用对照翻译模式，在原文后面换行追加中文，并补齐原文末尾的换行/空格以隔离下一段
-                            var trailing = "";
-                            var orig = item.el.menuDropXOriginalText || "";
-                            var match = orig.match(/\\s+$/);
-                            if (match) { trailing = match[0]; }
-                            item.el.nodeValue = orig + "\\n\\n" + decoded + trailing;
-                        } else if (item.type === 'container') {
-                            var transDiv = document.createElement('div');
-                            transDiv.className = 'menudropx-translated-text';
-                            transDiv.style.color = '#888888';
-                            transDiv.style.fontSize = '0.95em';
-                            transDiv.style.marginTop = '6px';
-                            transDiv.style.lineHeight = '1.4';
-                            transDiv.innerText = decoded;
-                            item.el.appendChild(transDiv);
-                        }
-                    } catch(e) {
-                        console.error("增量回填DOM出错:", e);
-                    }
-                }
-                queue.splice(taskIndex, 1);
-            })();
-            """
-            
-            DispatchQueue.main.async {
-                self.viewModel.evaluateJS(jsCode)
-            }
-        }
-        
         // MARK: - WKUIDelegate 自定义右键菜单翻译
         
         func webView(_ webView: WKWebView, willOpenMenu menu: NSMenu, with event: NSEvent) {
@@ -788,8 +695,8 @@ struct WebView: NSViewRepresentable {
         // 声明静态内存缓存，使所有的 WebView 实例和重新打开时可以共享已处理的图标
         static var iconMemoryCache: [String: NSImage] = [:]
         
-        /// 异步下载 Favicon，仅使用内存缓存，下载后直接设置尺寸使用，不做任何像素渲染处理
-        private func fetchFavicon(for host: String, completion: @escaping (NSImage?, NSImage?) -> Void) {
+        /// 异步下载 Favicon，优先通过 JS 解析 PWA apple-touch-icon，仅使用内存缓存，下载后直接设置尺寸使用
+        private func fetchFavicon(for host: String, webView: WKWebView? = nil, completion: @escaping (NSImage?, NSImage?) -> Void) {
             // 1. 尝试从内存缓存中读取
             let cacheKey = host
             if let cached = Self.iconMemoryCache[cacheKey] {
@@ -797,22 +704,55 @@ struct WebView: NSViewRepresentable {
                 return
             }
             
-            // 2. 无缓存，下载
-            let directURL = "https://\(host)/favicon.ico"
-            let fallbackAPI = "https://api.iowen.cn/favicon/\(host).png"
+            // 2. 多阶图标通道清单
+            let defaultURLs = [
+                "https://\(host)/favicon.ico",
+                "https://favicon.yandex.net/favicon/\(host)?size=128",
+                "https://api.iowen.cn/favicon/\(host).png",
+                "https://icon.horse/icon/\(host)"
+            ]
             
-            tryDownload(urls: [directURL, fallbackAPI], index: 0) { rawImage in
-                guard let rawImage = rawImage else {
-                    completion(nil, nil)
-                    return
+            let pwaExtractJS = """
+            (function() {
+                var appleIcon = document.querySelector('link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]');
+                if (appleIcon && appleIcon.href) return appleIcon.href;
+                var icons = Array.from(document.querySelectorAll('link[rel~="icon"]'));
+                if (icons.length > 0) {
+                    var best = icons.find(function(i) {
+                        var sz = i.getAttribute('sizes') || '';
+                        return sz.includes('192') || sz.includes('512') || sz.includes('180') || (i.href && i.href.endsWith('.svg'));
+                    });
+                    if (best && best.href) return best.href;
+                    if (icons[0] && icons[0].href) return icons[0].href;
                 }
-                
-                // 直接设置为 16x16，不做任何像素渲染
-                rawImage.size = NSSize(width: 16, height: 16)
-                rawImage.isTemplate = false
-                
-                Self.iconMemoryCache[cacheKey] = rawImage
-                completion(rawImage, rawImage)
+                return null;
+            })();
+            """
+            
+            let handleDownload: ([String]) -> Void = { urlsToTry in
+                self.tryDownload(urls: urlsToTry, index: 0) { rawImage in
+                    guard let rawImage = rawImage else {
+                        completion(nil, nil)
+                        return
+                    }
+                    rawImage.size = NSSize(width: 16, height: 16)
+                    rawImage.isTemplate = false
+                    Self.iconMemoryCache[cacheKey] = rawImage
+                    completion(rawImage, rawImage)
+                }
+            }
+            
+            if let webView = webView {
+                webView.evaluateJavaScript(pwaExtractJS) { result, _ in
+                    var urlsToTry: [String] = []
+                    if let pwaIconURL = result as? String, !pwaIconURL.isEmpty {
+                        urlsToTry.append(pwaIconURL)
+                    }
+                    urlsToTry.append(contentsOf: defaultURLs)
+                    handleDownload(urlsToTry)
+                }
+            } else {
+                handleDownload(defaultURLs)
             }
         }
         
@@ -838,10 +778,22 @@ struct WebView: NSViewRepresentable {
         
         /// 绘制并更新状态栏文字图标
         private func updateMenuIconToText(text: String, name: String, colorKey: String) {
-            let textIconImage = generateTextIconImage(text: text, name: name, colorKey: colorKey)
+            let image: NSImage
+            if text == "便签" {
+                // 如果是内置便签，高规格绘制苹果原生 note.text 模板，以完美适配 macOS 菜单栏明暗色自适应
+                if let sfImage = NSImage(systemSymbolName: "note.text", accessibilityDescription: "便签") {
+                    sfImage.isTemplate = true
+                    image = sfImage
+                } else {
+                    image = generateTextIconImage(text: "便", name: name, colorKey: colorKey)
+                }
+            } else {
+                image = generateTextIconImage(text: text, name: name, colorKey: colorKey)
+            }
+            
             DispatchQueue.main.async {
-                self.viewModel.currentFaviconColor = textIconImage
-                self.viewModel.currentFavicon = textIconImage
+                self.viewModel.currentFaviconColor = image
+                self.viewModel.currentFavicon = image
             }
         }
         
@@ -1396,7 +1348,7 @@ extension WebView {
                 { name: "微信读书", url: "https://weread.qq.com", domain: "weread.qq.com" },
                 { name: "微博", url: "https://m.weibo.cn", domain: "weibo.com" },
                 { name: "Bilibili", url: "https://m.bilibili.com", domain: "bilibili.com" },
-                { name: "滴答清单", url: "https://dida365.com", domain: "dida365.com" }
+                { name: "便签", url: "menudropx://justnote", isSystem: true }
             ];
             let sites = [];
             let isEditing = false;
@@ -1426,6 +1378,31 @@ extension WebView {
                 if (sites.length > 12) {
                     sites = sites.slice(0, 12);
                 }
+                
+                // 确保“便签”应用永久保留在 12 宫格中，且被硬编码为不可删除和修改的系统应用
+                let hasJustNote = false;
+                for (let i = 0; i < sites.length; i++) {
+                    if (sites[i] && sites[i].url === "menudropx://justnote") {
+                        hasJustNote = true;
+                        sites[i].name = "便签";
+                        sites[i].isSystem = true;
+                        break;
+                    }
+                }
+                if (!hasJustNote) {
+                    let inserted = false;
+                    for (let i = 0; i < sites.length; i++) {
+                        if (sites[i] === null) {
+                            sites[i] = { name: "便签", url: "menudropx://justnote", isSystem: true };
+                            inserted = true;
+                            break;
+                        }
+                    }
+                    if (!inserted) {
+                        sites[11] = { name: "便签", url: "menudropx://justnote", isSystem: true };
+                    }
+                }
+                
                 try {
                     saveData();
                 } catch(e) {}
@@ -1479,17 +1456,30 @@ extension WebView {
                 return first;
             }
             window.handleIconError = function(img, name, domain, colorKey, index) {
-                if (!img.dataset.triedGoogle) {
-                    img.dataset.triedGoogle = "true";
-                    const fallbackUrl = `https://www.google.com/s2/favicons?sz=128&domain=${domain}`;
+                var stage = parseInt(img.dataset.fallbackStage || "0", 10);
+                stage++;
+                img.dataset.fallbackStage = stage;
+
+                var fallbackUrl = "";
+                if (stage === 1) {
+                    // 通道一：Yandex 高清网页与 PWA 图标 API（128px，国内直连流畅，原生支持子域名）
+                    fallbackUrl = `https://favicon.yandex.net/favicon/${domain}?size=128`;
+                } else if (stage === 2) {
+                    // 通道二：iowen 国内专属 Favicon API
+                    fallbackUrl = `https://api.iowen.cn/favicon/${domain}.png`;
+                } else if (stage === 3) {
+                    // 通道三：IconHorse 国际 PWA 图标 API
+                    fallbackUrl = `https://icon.horse/icon/${domain}`;
+                }
+
+                if (fallbackUrl) {
                     img.src = fallbackUrl;
-                    
-                    // 将成功加载的 Google Favicon 地址保存回对应的数据卡片上，防止下次渲染再次触发加载延迟与白屏
                     if (index !== undefined && index !== null && sites[index]) {
                         sites[index].resolvedIcon = fallbackUrl;
                         saveData();
                     }
                 } else {
+                    // 最终降级：展示彩色渐变精美首字母卡片
                     img.style.display = 'none';
                     const parent = img.parentNode;
                     parent.style.background = getGradientForName(name, colorKey);
@@ -1546,19 +1536,20 @@ extension WebView {
             window.handleCardClick = function(index) {
                 const site = sites[index];
                 if (isEditing) {
+                    if (site && site.isSystem) return; // 系统应用无法修改
                     openModal(index);
                     return;
                 }
                 if (site) {
-                    // 若设定了自定义文字图标，实时推送给 Swift 以同步菜单栏图标
-                    if (site.iconText) {
+                    // 若设定了自定义文字图标，或为内置系统应用，实时推送给 Swift 以同步菜单栏图标
+                    if (site.isSystem || site.iconText) {
                         try {
                             window.webkit.messageHandlers.menuDropXTranslate.postMessage({
                                 type: 'updateActiveIcon',
                                 name: site.name,
-                                iconText: site.iconText,
-                                iconColor: site.iconColor || '',
-                                domain: site.domain || ''
+                                iconText: site.isSystem ? '便签' : site.iconText,
+                                iconColor: site.isSystem ? 'grey' : (site.iconColor || ''),
+                                domain: site.isSystem ? 'justnote' : (site.domain || '')
                             });
                         } catch(e) {}
                     }
@@ -1668,7 +1659,20 @@ extension WebView {
                     if (site) {
                         const classes = ["site-card", isEditing ? "editing shake-card" : ""].filter(Boolean).join(" ");
                         let iconHtml = "";
-                        if (site.iconText) {
+                        if (site.isSystem) {
+                            // "便签" 专属手绘质感极简输入框 SVG 图标
+                            iconHtml = `
+                                <div class="icon-container" style="background: #ffffff; border: 1.5px solid #000000; box-shadow: none; display: flex; align-items: center; justify-content: center;">
+                                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                        <polyline points="14 2 14 8 20 8"></polyline>
+                                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                                        <polyline points="10 9 9 9 8 9"></polyline>
+                                    </svg>
+                                </div>
+                            `;
+                        } else if (site.iconText) {
                             iconHtml = `
                                 <div class="icon-container" style="background: ${getGradientForName(site.name, site.iconColor)}; color: #ffffff; font-size: 18px; font-weight: 700; text-shadow: 0 1px 2px rgba(0,0,0,0.15);">
                                     ${site.iconText}
@@ -1682,6 +1686,7 @@ extension WebView {
                                 </div>
                             `;
                         }
+                        const deleteBadgeHtml = site.isSystem ? "" : `<div class="delete-badge" onclick="deleteSite(event, ${index})">×</div>`;
                         container.innerHTML += `
                             <a class="${classes}" 
                                draggable="${isEditing ? 'true' : 'false'}"
@@ -1690,7 +1695,7 @@ extension WebView {
                                ondragover="dragOver(event)" 
                                ondrop="drop(event, ${index})"
                                onclick="handleCardClick(${index})">
-                                <div class="delete-badge" onclick="deleteSite(event, ${index})">×</div>
+                                ${deleteBadgeHtml}
                                 ${iconHtml}
                                 <div class="site-name">${site.name}</div>
                             </a>
@@ -1774,6 +1779,17 @@ extension WebView {
         for wrapper in activeWebViews {
             guard let wv = wrapper.webView, wrapper.viewModel === viewModel else { continue }
             if wv.url?.host == "menudropx.local" {
+                if let path = wv.url?.path {
+                    if path.hasPrefix("/plugin/") {
+                        let filename = path.replacingOccurrences(of: "/plugin/", with: "")
+                        if filename == "JustNote" {
+                            return "menudropx://justnote"
+                        }
+                        return "menudropx://plugin/\(filename)"
+                    } else if path == "/justnote" {
+                        return "menudropx://justnote"
+                    }
+                }
                 return "menudropx://home"
             } else if let urlStr = wv.url?.absoluteString, !urlStr.isEmpty {
                 return urlStr
@@ -1818,3 +1834,33 @@ class WeakWKWebView {
 }
 
 
+
+// MARK: - 内置极简便签 HTML与通用插件管理器
+extension WebView {
+    /// 动态载入本地或 App Bundle 内部 of HTML 插件
+    static func loadPluginHTML(name: String) -> String {
+        let fileManager = FileManager.default
+        
+        // 1. 本地开发路径（编译期动态计算相对于当前 WebView.swift 的位置：同一级目录下的 plugin/）
+        let sourcePath = #filePath
+        let sourceURL = URL(fileURLWithPath: sourcePath)
+        let devPluginURL = sourceURL.deletingLastPathComponent().appendingPathComponent("plugin").appendingPathComponent("\(name).html")
+        
+        if fileManager.fileExists(atPath: devPluginURL.path),
+           let content = try? String(contentsOf: devPluginURL, encoding: .utf8) {
+            return content
+        }
+        
+        // 2. 正式包资源路径（App Bundle）
+        if let bundleURL = Bundle.main.url(forResource: name, withExtension: "html", subdirectory: "plugin"),
+           let content = try? String(contentsOf: bundleURL, encoding: .utf8) {
+            return content
+        }
+        if let bundleURL = Bundle.main.url(forResource: name, withExtension: "html"),
+           let content = try? String(contentsOf: bundleURL, encoding: .utf8) {
+            return content
+        }
+        
+        return "<html><body style='background:#fff;color:#000;padding:20px;font-family:sans-serif;'><h1>未找到本地插件 '\(name)'</h1><p>请确保在应用包内或开发目录（\(devPluginURL.path)）下存在该插件。</p></body></html>"
+    }
+}

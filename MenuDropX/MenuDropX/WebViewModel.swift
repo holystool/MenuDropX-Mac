@@ -37,8 +37,8 @@ class WebViewModel: ObservableObject {
         }
     }
     
-    // 是否为桌面端 User-Agent，默认为 false（手机端）
-    @Published var isDesktopUA: Bool = false
+    // 是否为桌面端 User-Agent，默认为 true（桌面原生模式）
+    @Published var isDesktopUA: Bool = true
     
     // 网页加载相关的状态，由 WebView 实时更新回传
     @Published var isLoading: Bool = false
@@ -49,7 +49,6 @@ class WebViewModel: ObservableObject {
     @Published var isTranslating: Bool = false
     
     // 当前页面是否已被翻译过（用于底栏按钮变蓝状态及双向还原逻辑）
-    @Published var isPageTranslated: Bool = false
     
     // 当前页面若是通过首页自定义文字图标卡片点击进入的，缓存对应的文字图标配置
     @Published var pendingTextIcon: String? = nil
@@ -118,7 +117,6 @@ class WebViewModel: ObservableObject {
         } else {
             action = .reload
         }
-        isPageTranslated = false
     }
     
     /// 返回主页
@@ -128,7 +126,6 @@ class WebViewModel: ObservableObject {
         } else {
             action = .loadHome
         }
-        isPageTranslated = false
     }
     
     /// 加载指定的 URL 地址
@@ -147,7 +144,6 @@ class WebViewModel: ObservableObject {
         } else {
             action = .load(cleanURL)
         }
-        isPageTranslated = false
     }
     
     /// 执行自定义的 JavaScript 脚本，直接作用于底层的真实网页中
